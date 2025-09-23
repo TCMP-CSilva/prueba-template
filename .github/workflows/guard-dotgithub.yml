@@ -1,0 +1,24 @@
+name: Guard .github
+
+on:
+  pull_request:
+    paths:
+      - '.github/**'
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Authorize
+        run: |
+          # 👇 Lista blanca de usuarios que SÍ pueden tocar .github/
+          ALLOWED_USERS="TCMP-CSilva"
+          if echo "$ALLOWED_USERS" | tr ' ' '\n' | grep -Fxq "${{ github.actor }}"; then
+            echo "OK: usuario permitido para modificar .github/"
+            exit 0
+          else
+            echo "Solo usuarios permitidos pueden modificar .github/"
+            exit 1
+          fi

@@ -1,0 +1,32 @@
+name: SQL Audit
+
+on:
+  push:
+    paths:
+      - '**/*.sql'
+      - '.github/audit/**'
+      - '.github/workflows/sql-audit.yml'
+  pull_request:
+    paths:
+      - '**/*.sql'
+      - '.github/audit/**'
+      - '.github/workflows/sql-audit.yml'
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run audit
+        run: |
+          python .github/audit/audit_sql_standards.py
