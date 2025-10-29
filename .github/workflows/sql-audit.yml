@@ -1,4 +1,4 @@
-name: SQL Audit
+name: Auditoría SQL (NOLOCK & reglas)
 
 on:
   push:
@@ -13,20 +13,16 @@ on:
       - '.github/workflows/sql-audit.yml'
 
 jobs:
-  audit:
+  audit-sql:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
     steps:
-      - name: Checkout
+      - name: 🧾 Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Run audit
-        run: |
-          python .github/audit/audit_sql_standards.py
+      - name: 🔍 Ejecutar auditoría
+        run: python .github/audit/audit_sql_standards.py

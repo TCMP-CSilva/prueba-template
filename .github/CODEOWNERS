@@ -1,0 +1,3 @@
+# Ruta (puede ser archivo, carpeta o patrón)   Usuario(s)/equipo(s)
+.github/*    @TCMP-CSilva
+*.py         @TCMP-CSilva

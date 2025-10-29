@@ -1,1 +1,2 @@
-.github/audit/audit_logs/
+audit_logs/
+*.log
