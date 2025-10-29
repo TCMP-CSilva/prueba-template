@@ -1,516 +1,366 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Auditoría de estándares SQL para SQL Server (T-SQL) con heurísticas ligeras
-y configuración externa. Pensado para correr en CI.
-
-Incluye:
-- Stripper de comentarios /* ... */ y '-- ...'
-- Reglas:
-  * WITH (NOLOCK) detrás de FROM/JOIN                       (error)
-  * Caracteres especiales no permitidos                     (error)
-  * Temporales globales (##)                                (error)
-  * Nombres temporales genéricos (#tmp/#temp)               (warning)
-  * Uso de CURSOR                                           (error)
-  * Funciones de usuario en WHERE                           (error)
-  * Múltiples JOIN sin WHERE                                (warning)
-  * SELECT *                                                (error)
-  * SELECT TOP(...)                                         (warning)
-  * UPDATE/DELETE sin WHERE                                 (error)
-  * INSERT sin lista de columnas                            (error)
-  * EXEC/sp_executesql con SQL dinámico no parametrizado    (error)
-  * SELECT DISTINCT (silenciable con '-- distinct-ok')      (warning)
-
-Mejoras de rendimiento:
-- Patrones regex precompilados (global).
-- Compilación única del patrón de caracteres especiales.
-- Exclusión de directorios desde config.
-- Salto de archivos grandes por umbral (MB) desde config.
-"""
-
-from __future__ import annotations
-
 import os
 import re
 import sys
-import logging
 from pathlib import Path
-from configparser import ConfigParser
-from typing import Dict, List, Tuple
+import configparser
 
-# ======================
-# Configuración por defecto
-# ======================
+# -----------------------------
+# Config: fija la ubicación del INI en .github/audit/
+# -----------------------------
+CFG_FIXED_PATH = Path(".github/audit/audit_config.ini")
 
-DEFAULT_CONFIG_PATH = ".github/audit/audit_config.ini"
+def load_config_fixed(repo_root: Path) -> configparser.ConfigParser:
+    cfg = configparser.ConfigParser()
+    cfg_path = (repo_root / CFG_FIXED_PATH).resolve()
+    if not cfg_path.exists():
+        print(f"⚠️  No se encontró {cfg_path}. Usando defaults.")
+    else:
+        cfg.read(cfg_path, encoding="utf-8")
+    return cfg
 
-DEFAULT_SEVERITIES: Dict[str, str] = {
-    # Reglas existentes
+def parse_roots_from_config(cfg: configparser.ConfigParser, repo_root: Path) -> list[Path]:
+    raw = cfg.get("paths", "sql_roots", fallback=".").strip()
+    tokens = [t.strip() for t in raw.replace(";", ",").split(",") if t.strip()]
+    roots = [(repo_root / t if not Path(t).is_absolute() else Path(t)) for t in (tokens or ["."])]
+    # Normaliza y filtra duplicados.
+    out = []
+    for r in roots:
+        r = r.resolve()
+        if r not in out:
+            out.append(r)
+    return out or [repo_root]
+
+# -----------------------------
+# Severidades por regla
+# -----------------------------
+DEFAULT_SEVERITIES = {
     "nolock": "error",
-    "special_chars": "error",
+    "special_chars": "warning",
     "global_temp": "error",
     "temp_names": "warning",
     "cursors": "error",
     "user_functions": "error",
     "inner_join_where": "warning",
     "select_star": "error",
-    "select_top": "warning",
-    # Reglas nuevas
-    "update_delete_no_where": "error",
-    "insert_no_column_list": "error",
-    "dynamic_sql_exec": "error",
-    "select_distinct": "warning",
+    "select_top": "error",
 }
 
-# ======================
-# Utilidades
-# ======================
+def sev(cfg: configparser.ConfigParser, rule: str) -> str:
+    s = cfg.get("severities", rule, fallback=DEFAULT_SEVERITIES.get(rule, "error")).lower()
+    return "off" if s not in {"error", "warning", "off"} else s
 
-def load_config(path: str = DEFAULT_CONFIG_PATH) -> ConfigParser:
-    cfg = ConfigParser()
-    if not Path(path).exists():
-        raise FileNotFoundError(f"No se encontró el archivo de configuración: {path}")
-    cfg.read(path, encoding="utf-8")
-    return cfg
+def badge(severity: str) -> str:
+    return "❌" if severity == "error" else "⚠️"
 
-def setup_logging(cfg: ConfigParser) -> None:
-    level = getattr(logging, (cfg.get("log", "level", fallback="INFO") or "INFO").upper(), logging.INFO)
-    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
-    logging.debug("Logger inicializado.")
+# -----------------------------
+# Patrones comunes
+# -----------------------------
+nolock_pattern = re.compile(r"(WITH\s*)?\(\s*NOLOCK\s*(,\s*READUNCOMMITTED\s*)?\)", re.IGNORECASE)
+nolock_paren_only_pattern = re.compile(r"\(\s*NOLOCK\s*(,\s*READUNCOMMITTED\s*)?\)", re.IGNORECASE)
+ignore_temp_tables_pattern = re.compile(r"\bFROM\s+[#@]{1,2}[\w\d_]+", re.IGNORECASE)
+global_temp_pattern = re.compile(r"##\w+", re.IGNORECASE)
+bad_temp_names_pattern = re.compile(r"(#temp|@temp)\b", re.IGNORECASE)
+cursor_pattern = re.compile(r"\bCURSOR\b", re.IGNORECASE)
+user_function_in_where_pattern = re.compile(r"WHERE\s+.*?\b(?:dbo|db|schema|owner)\.\w+\s*\(.*?\)", re.IGNORECASE)
 
-def get_excluded_dirs(cfg: ConfigParser) -> set[str]:
-    base = {".git", ".github", ".config", ".venv", "venv", ".idea", ".pytest_cache", "__pycache__"}
-    extra = {d.strip() for d in cfg.get("paths", "exclude_dirs", fallback="").split(",") if d.strip()}
-    return base | extra
+# sys.* y sysobjects (excepción en NOLOCK)
+def is_sys_table(token: str) -> bool:
+    t = token.strip().strip("[]")
+    low = t.lower()
+    # Casos: "sysobjects", "sys.objects", "sys.sysobjects", etc.
+    if low == "sysobjects":
+        return True
+    parts = [p.strip("[]").lower() for p in t.split(".")]
+    if parts and parts[0] == "sys":
+        return True
+    return False
 
-def get_max_file_bytes(cfg: ConfigParser) -> int:
-    mb = cfg.getint("limits", "max_file_mb", fallback=0)
-    return mb * 1024 * 1024 if mb > 0 else 0
-
-def iter_sql_files(root: Path, excluded: set[str]) -> List[Path]:
-    files: List[Path] = []
-    for base, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in excluded]
-        for f in filenames:
-            if f.lower().endswith(".sql"):
-                files.append(Path(base) / f)
-    return files
-
-def rule_enabled(cfg: ConfigParser, name: str, default: bool = True) -> bool:
-    return cfg.getboolean("rules", name, fallback=default)
-
-def rule_severity(cfg: ConfigParser, name: str) -> str:
-    return cfg.get("severities", name, fallback=DEFAULT_SEVERITIES.get(name, "warning")).lower()
-
-def read_file_lines(p: Path) -> List[str]:
-    try:
-        return p.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except Exception as e:
-        logging.error(f"No se pudo leer {p}: {e}")
-        return []
-
-def compile_special_charclass(chars_text: str) -> re.Pattern:
-    """
-    Construye una clase de caracteres a partir de líneas con caracteres a bloquear.
-    Si el archivo trae varias líneas, todos se agregan a la clase.
-    """
-    chars = []
-    for line in chars_text.splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        chars.append(re.escape(s))
-    if not chars:
-        # fallback: caracteres fuera de ASCII básico
-        return re.compile(r"[^\x09\x0A\x0D\x20-\x7E]")
-    return re.compile("[" + "".join(chars) + "]")
-
-def strip_inline_and_block_comments(lines: List[str]) -> List[str]:
-    """
-    Quita comentarios de línea '-- ...' y de bloque '/* ... */' preservando el número de líneas
-    (inserta vacíos cuando corresponde) para mantener referencias de número de línea.
-    """
-    cleaned: List[str] = []
-    in_block = False
-    for ln in lines:
-        s = ln
-        if in_block:
-            if "*/" in s:
-                s = s.split("*/", 1)[1]
-                in_block = False
-            else:
-                cleaned.append("")
-                continue
-        while "/*" in s:
-            pre, rest = s.split("/*", 1)
-            if "*/" in rest:
-                rest = rest.split("*/", 1)[1]
-                s = pre + " " + rest
-            else:
-                s = pre
-                in_block = True
-                break
-        s = s.split("--", 1)[0]
-        cleaned.append(s)
-    return cleaned
-
-# ======================
-# Patrones precompilados (performance)
-# ======================
-
-RE_FROM = re.compile(r"\bFROM\b", re.IGNORECASE)
-RE_JOIN = re.compile(r"\bJOIN\b", re.IGNORECASE)
-RE_WITH_NOLOCK = re.compile(r"\bWITH\s*\(\s*NOLOCK\s*\)", re.IGNORECASE)
-RE_FROM_OR_JOIN_TABLE = re.compile(r"\b(?:FROM|JOIN)\s+([#@\[\]\w\.]+)", re.IGNORECASE)
-
-RE_GLOBAL_TEMP = re.compile(r"\b##[A-Za-z0-9_]+\b")
-RE_TEMP_GENERIC = re.compile(r"\b#[Tt][Ee][Mm][Pp]\b|\b#tmp\b|\b#temp\b", re.IGNORECASE)
-
-RE_CURSOR = re.compile(r"\bDECLARE\s+\w+\s+CURSOR\b|\bOPEN\s+\w+\b|\bFETCH\s+NEXT\b", re.IGNORECASE)
-
-RE_USER_FUNC_IN_WHERE = re.compile(
-    r"\bWHERE\b.*?(?:\b[dD][bB][oO]\s*\.\s*|[A-Za-z_]\w*\s*\.\s*)[A-Za-z_]\w*\s*\(",
-    re.IGNORECASE
-)
-
-RE_SELECT = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
-RE_SELECT_STAR = re.compile(r"\bSELECT\b[^;]*\*", re.IGNORECASE)
-RE_SELECT_TOP = re.compile(r"\bSELECT\b[^;]*\bTOP\s*\(", re.IGNORECASE)
-RE_SELECT_DISTINCT = re.compile(r"\bSELECT\s+DISTINCT\b", re.IGNORECASE)
-
-RE_STATEMENT_END = re.compile(r";\s*$")
-RE_GO = re.compile(r"^\s*GO\s*$", re.IGNORECASE)
-
-RE_UPDATE_OR_DELETE_START = re.compile(r"^\s*(UPDATE|DELETE)\b", re.IGNORECASE)
-RE_INSERT_START = re.compile(r"^\s*INSERT\s+(?:INTO\s+)?([#@\[\]\w\.]+)(.*)$", re.IGNORECASE)
-
-RE_EXEC = re.compile(r"\bEXEC(?:UTE)?\b", re.IGNORECASE)
-RE_EXEC_CONCAT = re.compile(r"EXEC(?:UTE)?\s*\(?\s*(?:N)?'.*?'\s*\+\s*|EXEC(?:UTE)?\s*\(?\s*.*?\+\s*@\w+",
-                            re.IGNORECASE)
-RE_SP_EXECUTESQL = re.compile(r"\bsp_executesql\b", re.IGNORECASE)
-RE_SP_PARAMS_DECL = re.compile(r"sp_executesql\s+N?'.*?'\s*,\s*N?'.*?@\w+\s+", re.IGNORECASE)
-RE_SP_PARAMS_ASSIGN = re.compile(r"@\w+\s*=", re.IGNORECASE)
-
-# ======================
-# Reglas (checks)
-# ======================
-
-def check_nolock_present(lines: List[str]) -> List[str]:
-    """
-    Detecta WITH (NOLOCK) detrás de FROM/JOIN, permitiendo excepciones:
-    - Tablas del sistema (sys.*)
-    - Tablas temporales (#, ##)
-    Nota: usa líneas sin comentarios para menos falsos positivos.
-    """
-    issues = []
-    clines = strip_inline_and_block_comments(lines)
-    for i, ln in enumerate(clines, 1):
-        if not (RE_FROM.search(ln) or RE_JOIN.search(ln)):
-            continue
-        if RE_WITH_NOLOCK.search(ln):
-            m = RE_FROM_OR_JOIN_TABLE.search(ln)
-            if m:
-                tname = m.group(1)
-                if tname.startswith("sys.") or tname.startswith("#") or tname.startswith("##"):
+# -----------------------------
+# Carga de caracteres especiales
+# -----------------------------
+def compile_special_chars_pattern(cfg: configparser.ConfigParser, repo_root: Path) -> re.Pattern:
+    rel = cfg.get("paths", "special_chars_file", fallback=".github/audit/special_chars.txt").strip()
+    path = (repo_root / rel) if not Path(rel).is_absolute() else Path(rel)
+    chars: list[str] = []
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                s = raw.strip()
+                if not s or s.startswith("#"):
                     continue
-            issues.append(f"   Línea {i}: WITH (NOLOCK) detectado; evita lecturas sucias.")
-    return issues
+                chars.append(s)
+    if not chars:
+        chars = list("áéíóúÁÉÍÓÚñÑ&%$¡¿")
+    if all(len(c) == 1 for c in chars):
+        escaped = "".join(re.escape(c) for c in chars)
+        return re.compile(f"[{escaped}]")
+    chars.sort(key=len, reverse=True)
+    alt = "|".join(re.escape(c) for c in chars)
+    return re.compile(alt, re.IGNORECASE)
 
-def check_special_chars(lines: List[str], special_char_pat: re.Pattern) -> List[str]:
-    issues = []
-    for i, ln in enumerate(lines, 1):
-        if special_char_pat.search(ln):
-            issues.append(f"   Línea {i}: Caracteres especiales no permitidos.")
-    return issues
+# -----------------------------
+# Reglas (modular)
+# -----------------------------
+def rule_enabled(cfg: configparser.ConfigParser, key: str, default: bool = True) -> bool:
+    return cfg.getboolean("rules", key, fallback=default)
 
-def check_global_temp_tables(lines: List[str]) -> List[str]:
-    issues = []
-    for i, ln in enumerate(lines, 1):
-        if RE_GLOBAL_TEMP.search(ln):
-            issues.append(f"   Línea {i}: Tabla temporal global (##) detectada.")
-    return issues
-
-def check_temp_names_generic(lines: List[str]) -> List[str]:
-    issues = []
-    for i, ln in enumerate(lines, 1):
-        if RE_TEMP_GENERIC.search(ln):
-            issues.append(f"   Línea {i}: Nombre temporal genérico (#tmp/#temp); usa nombres descriptivos.")
-    return issues
-
-def check_cursors(lines: List[str]) -> List[str]:
-    issues = []
-    for i, ln in enumerate(lines, 1):
-        if RE_CURSOR.search(ln):
-            issues.append(f"   Línea {i}: Uso de CURSOR detectado; evalúa set-based o WHILE.")
-    return issues
-
-def check_user_functions_in_where(lines: List[str]) -> List[str]:
-    issues = []
-    for i, ln in enumerate(lines, 1):
-        if RE_USER_FUNC_IN_WHERE.search(ln):
-            issues.append(f"   Línea {i}: Función de usuario en WHERE; podría impedir índices.")
-    return issues
-
-def check_inner_join_then_where(lines: List[str]) -> List[str]:
-    issues = []
-    join_count = 0
-    in_block = False
-    start_line = None
-    for i, ln in enumerate(lines, 1):
-        s = ln.strip()
-        if RE_SELECT.search(s) and not in_block:
-            in_block = True
-            join_count = 0
-            start_line = i
-        if in_block:
-            if RE_JOIN.search(s):
-                join_count += 1
-            if re.search(r"\bWHERE\b", s, re.IGNORECASE):
-                in_block = False
-                continue
-            if RE_STATEMENT_END.search(s) or RE_GO.search(s):
-                if join_count >= 2:
-                    issues.append(f"   Línea {start_line}: Múltiples JOIN sin WHERE; valida selectividad.")
-                in_block = False
-    return issues
-
-def check_select_star(lines: List[str]) -> List[str]:
-    issues = []
-    clines = strip_inline_and_block_comments(lines)
-    for i, ln in enumerate(clines, 1):
-        if RE_SELECT_STAR.search(ln):
-            issues.append(f"   Línea {i}: SELECT * detectado; especifica columnas.")
-    return issues
-
-def check_select_top(lines: List[str]) -> List[str]:
-    issues = []
-    clines = strip_inline_and_block_comments(lines)
-    for i, ln in enumerate(clines, 1):
-        if RE_SELECT_TOP.search(ln):
-            issues.append(f"   Línea {i}: SELECT TOP(...) detectado; valida paginación y orden.")
-    return issues
-
-def check_update_delete_without_where(lines: List[str]) -> List[str]:
-    clines = strip_inline_and_block_comments(lines)
-    issues: List[str] = []
-    buffering = False
-    start_line = None
-    buf: List[str] = []
-    def _finalize():
-        nonlocal buf, start_line
-        if not buf:
-            return
-        joined = " ".join(buf)
-        if re.search(r"^\s*DELETE\b", joined, re.IGNORECASE) or re.search(r"^\s*UPDATE\b", joined, re.IGNORECASE):
-            if not re.search(r"\bWHERE\b", joined, re.IGNORECASE):
-                op = "DELETE" if re.search(r"^\s*DELETE\b", joined, re.IGNORECASE) else "UPDATE"
-                issues.append(f"   Línea {start_line}: {op} sin WHERE")
-        buf = []
-        start_line = None
-    for i, ln in enumerate(clines, 1):
-        line = ln.strip()
-        if not buffering and RE_UPDATE_OR_DELETE_START.search(line):
-            buffering = True
-            start_line = i
-            buf = [line]
-            if RE_STATEMENT_END.search(line) or RE_GO.search(line):
-                buffering = False
-                _finalize()
+def check_nolock(lines):
+    issues=[]
+    for i,ln in enumerate(lines,1):
+        l=ln.strip()
+        if l.startswith('--') or ignore_temp_tables_pattern.search(ln):
             continue
+        # Si la línea ya tiene NOLOCK, ok
+        if nolock_pattern.search(ln) or nolock_paren_only_pattern.search(ln):
+            continue
+        m = re.search(r"\b(FROM|JOIN)\s+([\w.\[\]]+)", ln, re.IGNORECASE)
+        if m:
+            table = m.group(2)
+            # Excepción: tablas del sistema (sys.*, sysobjects)
+            if is_sys_table(table):
+                continue
+            # Ignorar temporales/variables
+            if re.match(r"[#@]", table):
+                continue
+            issues.append(f"   Línea {i}: Falta hint WITH (NOLOCK) en {m.group(1).upper()} tabla '{table}'")
+    return issues
+
+def check_special_chars(lines, special_chars_re: re.Pattern):
+    return [f"   Línea {i}: {ln.strip()}" for i, ln in enumerate(lines,1) if special_chars_re.search(ln)]
+
+def check_global_temp(lines):
+    return [f"   Línea {i}: {ln.strip()}" for i, ln in enumerate(lines,1)
+            if not ln.strip().startswith('--') and global_temp_pattern.search(ln)]
+
+def check_temp_names(lines):
+    return [f"   Línea {i}: {ln.strip()}" for i, ln in enumerate(lines,1)
+            if not ln.strip().startswith('--') and bad_temp_names_pattern.search(ln)]
+
+def check_cursors(lines):
+    return [f"   Línea {i}: {ln.strip()}" for i, ln in enumerate(lines,1)
+            if not ln.strip().startswith('--') and cursor_pattern.search(ln)]
+
+def check_user_funcs(lines):
+    issues=[]
+    for i,ln in enumerate(lines,1):
+        l=ln.strip()
+        if l.startswith('--'): 
+            continue
+        if user_function_in_where_pattern.search(ln):
+            issues.append(f"   Línea {i}: {l}")
+    return issues
+
+def check_inner_join_warnings(lines):
+    issues=[]
+    join_count=0; first_join=None; has_variant=False; in_block=False
+    for i,ln in enumerate(lines,1):
+        line = ln.strip()
+        if not line or line.startswith('--'):
+            continue
+        if re.search(r"\bSELECT\b", line, re.IGNORECASE):
+            join_count=0; first_join=None; has_variant=False; in_block=True
+        if not in_block:
+            continue
+        if re.search(r"\bINNER\s+JOIN\b", line, re.IGNORECASE):
+            join_count+=1
+            if first_join is None:
+                first_join=i
+        if re.search(r"\b(LEFT|RIGHT|FULL|OUTER)\s+JOIN\b", line, re.IGNORECASE):
+            has_variant=True
+        if re.search(r"\bWHERE\b", line, re.IGNORECASE):
+            if join_count>1 and not has_variant and first_join is not None:
+                issues.append(f"   Línea {first_join}: Múltiples INNER JOIN + WHERE sin variantes")
+            in_block=False; join_count=0; has_variant=False; first_join=None
+        if re.search(r";\s*$", line):
+            in_block=False; join_count=0; has_variant=False; first_join=None
+    return issues
+
+# --- Nuevas reglas ---
+def check_select_star(lines):
+    """
+    Detecta SELECT * (aunque esté partido en varias líneas).
+    Lógica: acumula desde SELECT hasta FROM y evalúa el "cláusula de selección".
+    """
+    issues=[]
+    buffering=False
+    buf=[]; start_line=None
+    for i,ln in enumerate(lines,1):
+        raw = ln
+        line = ln.split("--",1)[0]  # quita comentario hasta fin de línea
+        if not buffering and re.search(r"\bSELECT\b", line, re.IGNORECASE):
+            buffering=True
+            start_line=i
+            buf=[line]
+            # ¿SELECT y FROM en misma línea?
+            if re.search(r"\bFROM\b", line, re.IGNORECASE):
+                buffering=False
+                joined=" ".join(buf)
+                m=re.search(r"\bSELECT\b(?P<clause>.*?)\bFROM\b", joined, re.IGNORECASE|re.DOTALL)
+                if m:
+                    clause = m.group("clause")
+                    if re.fullmatch(r"\s*\*\s*", clause, re.DOTALL):
+                        issues.append(f"   Línea {start_line}: Uso de SELECT *")
+                buf=[]
+            continue
+
         if buffering:
             buf.append(line)
-            if RE_STATEMENT_END.search(line) or RE_GO.search(line):
-                buffering = False
-                _finalize()
-    if buffering:
-        _finalize()
+            if re.search(r"\bFROM\b", line, re.IGNORECASE):
+                buffering=False
+                joined=" ".join(buf)
+                m=re.search(r"\bSELECT\b(?P<clause>.*?)\bFROM\b", joined, re.IGNORECASE|re.DOTALL)
+                if m:
+                    clause = m.group("clause")
+                    if re.fullmatch(r"\s*\*\s*", clause, re.DOTALL):
+                        issues.append(f"   Línea {start_line}: Uso de SELECT *")
+                buf=[]
+
     return issues
 
-def check_insert_without_column_list(lines: List[str]) -> List[str]:
-    clines = strip_inline_and_block_comments(lines)
-    issues: List[str] = []
-    buffering = False
-    start_line = None
-    saw_open_paren = False
-    pending = False
-    for i, ln in enumerate(clines, 1):
-        line = ln.strip()
-        if not buffering:
-            m = RE_INSERT_START.search(line)
-            if m:
-                buffering = True
-                start_line = i
-                rest = m.group(2) or ""
-                saw_open_paren = "(" in rest
-                pending = True
-                if re.search(r"\b(VALUES|SELECT)\b", rest, re.IGNORECASE):
-                    if not saw_open_paren:
-                        issues.append(f"   Línea {start_line}: INSERT sin lista de columnas")
-                    buffering = False
-                    pending = False
+def check_select_top(lines):
+    """
+    Detecta uso de SELECT TOP (en la cláusula inmediatamente tras SELECT).
+    """
+    issues=[]
+    buffering=False
+    buf=[]; start_line=None
+    for i,ln in enumerate(lines,1):
+        line = ln.split("--",1)[0]
+        if not buffering and re.search(r"\bSELECT\b", line, re.IGNORECASE):
+            buffering=True
+            start_line=i
+            buf=[line]
+            if re.search(r"\bFROM\b", line, re.IGNORECASE):
+                buffering=False
+                joined=" ".join(buf)
+                m=re.search(r"\bSELECT\b(?P<clause>.*?)\bFROM\b", joined, re.IGNORECASE|re.DOTALL)
+                if m and re.search(r"\bTOP\b", m.group("clause"), re.IGNORECASE):
+                    issues.append(f"   Línea {start_line}: Uso de SELECT TOP")
+                buf=[]
             continue
+
         if buffering:
-            if "(" in line and not saw_open_paren:
-                saw_open_paren = True
-            if re.search(r"\b(VALUES|SELECT)\b", line, re.IGNORECASE):
-                if pending and not saw_open_paren:
-                    issues.append(f"   Línea {start_line}: INSERT sin lista de columnas")
-                buffering = False
-                pending = False
-                continue
-            if RE_STATEMENT_END.search(line) or RE_GO.search(line):
-                buffering = False
-                pending = False
+            buf.append(line)
+            if re.search(r"\bFROM\b", line, re.IGNORECASE):
+                buffering=False
+                joined=" ".join(buf)
+                m=re.search(r"\bSELECT\b(?P<clause>.*?)\bFROM\b", joined, re.IGNORECASE|re.DOTALL)
+                if m and re.search(r"\bTOP\b", m.group("clause"), re.IGNORECASE):
+                    issues.append(f"   Línea {start_line}: Uso de SELECT TOP")
+                buf=[]
     return issues
 
-def check_dynamic_sql_exec(lines: List[str]) -> List[str]:
-    clines = strip_inline_and_block_comments(lines)
-    issues: List[str] = []
-    for i, ln in enumerate(clines, 1):
-        s = ln
-        if not RE_EXEC.search(s):
-            continue
-        if RE_EXEC_CONCAT.search(s):
-            issues.append(f"   Línea {i}: EXEC con SQL dinámico concatenado; usa sp_executesql con parámetros.")
-            continue
-        if RE_SP_EXECUTESQL.search(s):
-            has_params_decl = RE_SP_PARAMS_DECL.search(s)
-            has_params_assign = RE_SP_PARAMS_ASSIGN.search(s)
-            if not (has_params_decl and has_params_assign):
-                issues.append(f"   Línea {i}: sp_executesql sin parámetros; parametriza los valores.")
-    return issues
+# -----------------------------
+# Auditoría de archivo
+# -----------------------------
+def audit_file(fp: Path, cfg: configparser.ConfigParser, special_chars_re: re.Pattern):
+    with open(fp, encoding="utf-8") as f:
+        lines = f.read().splitlines(True)
 
-def check_select_distinct(lines: List[str]) -> List[str]:
-    issues: List[str] = []
-    for i, ln in enumerate(lines, 1):
-        if RE_SELECT_DISTINCT.search(ln) and not re.search(r"distinct-ok", ln, re.IGNORECASE):
-            issues.append(f"   Línea {i}: SELECT DISTINCT (valida necesidad o documenta con '-- distinct-ok').")
-    return issues
+    res = {
+        "archivo": str(fp),
+        "nolock": [], "special": [], "global": [], "temp": [],
+        "curs": [], "funcs": [], "warn": [],
+        "select_star": [], "select_top": []
+    }
 
-# ======================
-# Auditoría por archivo
-# ======================
-
-def audit_file(
-    p: Path,
-    cfg: ConfigParser,
-    special_char_pat: re.Pattern
-) -> Dict[str, List[str]]:
-    lines = read_file_lines(p)
-    results: Dict[str, List[str]] = {}
     if rule_enabled(cfg, "nolock", True):
-        results["nolock"] = check_nolock_present(lines)
+        res["nolock"] = check_nolock(lines)
     if rule_enabled(cfg, "special_chars", True):
-        results["special_chars"] = check_special_chars(lines, special_char_pat)
+        res["special"] = check_special_chars(lines, special_chars_re)
     if rule_enabled(cfg, "global_temp", True):
-        results["global_temp"] = check_global_temp_tables(lines)
+        res["global"] = check_global_temp(lines)
     if rule_enabled(cfg, "temp_names", True):
-        results["temp_names"] = check_temp_names_generic(lines)
+        res["temp"] = check_temp_names(lines)
     if rule_enabled(cfg, "cursors", True):
-        results["cursors"] = check_cursors(lines)
+        res["curs"] = check_cursors(lines)
     if rule_enabled(cfg, "user_functions", True):
-        results["user_functions"] = check_user_functions_in_where(lines)
+        res["funcs"] = check_user_funcs(lines)
     if rule_enabled(cfg, "inner_join_where", True):
-        results["inner_join_where"] = check_inner_join_then_where(lines)
+        res["warn"] = check_inner_join_warnings(lines)
     if rule_enabled(cfg, "select_star", True):
-        results["select_star"] = check_select_star(lines)
+        res["select_star"] = check_select_star(lines)
     if rule_enabled(cfg, "select_top", True):
-        results["select_top"] = check_select_top(lines)
-    # Nuevas
-    if rule_enabled(cfg, "update_delete_no_where", True):
-        results["upd_del"] = check_update_delete_without_where(lines)
-    if rule_enabled(cfg, "insert_no_column_list", True):
-        results["ins_cols"] = check_insert_without_column_list(lines)
-    if rule_enabled(cfg, "dynamic_sql_exec", True):
-        results["dyn_exec"] = check_dynamic_sql_exec(lines)
-    if rule_enabled(cfg, "select_distinct", True):
-        results["distinct"] = check_select_distinct(lines)
-    return results
+        res["select_top"] = check_select_top(lines)
 
-def print_results_for_file(p: Path, cfg: ConfigParser, res: Dict[str, List[str]]) -> Tuple[bool, bool]:
-    print(f"\nArchivo: {p}")
+    return res
+
+# -----------------------------
+# Main
+# -----------------------------
+def main():
+    print("==== Auditoría iniciada ====\n")
+    repo_root = Path.cwd().resolve()
+    cfg = load_config_fixed(repo_root)
+    roots = parse_roots_from_config(cfg, repo_root)
+    print(f"Raíz del repo detectada: {repo_root}")
+    print("Orígenes a auditar:")
+    for r in roots:
+        print(f"  - {r}")
+
     any_issue_as_error = False
-    any_issue = False
-    def show(rule_key: str, title: str, items: List[str]) -> None:
-        nonlocal any_issue_as_error, any_issue
-        if not items:
-            return
-        sev = rule_severity(cfg, rule_key)
-        badge = {"error": "⛔", "warning": "⚠️", "off": "⚪"}.get(sev, "⚠️")
-        print(f"  {badge} {title} ({sev})")
-        for it in items:
-            print(it)
-        if sev == "error":
-            any_issue_as_error = True
-        any_issue = True
-    show("nolock", "WITH (NOLOCK) detectado:", res.get("nolock", []))
-    show("special_chars", "Caracteres especiales:", res.get("special_chars", []))
-    show("global_temp", "Temporales globales (##):", res.get("global_temp", []))
-    show("temp_names", "Nombres temporales genéricos:", res.get("temp_names", []))
-    show("cursors", "Uso de CURSOR:", res.get("cursors", []))
-    show("user_functions", "Funciones en WHERE:", res.get("user_functions", []))
-    show("inner_join_where", "JOINs sin WHERE:", res.get("inner_join_where", []))
-    show("select_star", "SELECT *:", res.get("select_star", []))
-    show("select_top", "SELECT TOP:", res.get("select_top", []))
-    # Nuevas
-    show("update_delete_no_where", "UPDATE/DELETE sin WHERE:", res.get("upd_del", []))
-    show("insert_no_column_list", "INSERT sin lista de columnas:", res.get("ins_cols", []))
-    show("dynamic_sql_exec", "SQL dinámico no parametrizado (EXEC/sp_executesql):", res.get("dyn_exec", []))
-    show("select_distinct", "SELECT DISTINCT detectado:", res.get("distinct", []))
-    return any_issue, any_issue_as_error
+    audited_any = False
 
-# ======================
-# main
-# ======================
-
-def main() -> int:
-    cfg = load_config(DEFAULT_CONFIG_PATH)
-    setup_logging(cfg)
-
-    roots_value = cfg.get("paths", "sql_roots", fallback=".")
-    roots = [Path(r.strip()) for r in roots_value.split(",") if r.strip()]
-
-    # Compilar una vez el patrón de caracteres especiales
-    special_chars_path = cfg.get("paths", "special_chars_file", fallback="")
-    if special_chars_path and Path(special_chars_path).exists():
-        special_chars_text = Path(special_chars_path).read_text(encoding="utf-8", errors="ignore")
-        special_char_pat = compile_special_charclass(special_chars_text)
-    else:
-        special_char_pat = compile_special_charclass("")
-
-    # Mejoras de rendimiento
-    excluded = get_excluded_dirs(cfg)
-    max_bytes = get_max_file_bytes(cfg)
-
-    overall_any_issue = False
-    overall_error = False
-
-    for root in roots:
-        if not root.exists():
-            logging.warning(f"Ruta no encontrada: {root}")
+    for root_dir in roots:
+        root_dir = root_dir.resolve()
+        if not root_dir.exists() or not root_dir.is_dir():
+            print(f"⚠️  Origen no válido (se omite): {root_dir}")
             continue
-        files = iter_sql_files(root, excluded)
-        for f in files:
-            try:
-                if max_bytes and f.exists() and f.stat().st_size > max_bytes:
-                    logging.info(f"Saltando archivo grande (> {max_bytes} bytes): {f}")
-                    continue
-            except OSError as e:
-                logging.warning(f"No se pudo obtener tamaño de {f}: {e}")
-            res = audit_file(f, cfg, special_char_pat)
-            has_any, has_err = print_results_for_file(f, cfg, res)
-            overall_any_issue = overall_any_issue or has_any
-            overall_error = overall_error or has_err
 
-    if not overall_any_issue:
-        print("\n✅ Sin hallazgos. ¡Todo limpio!")
-        return 0
-    if overall_error:
-        print("\n⛔ Se encontraron hallazgos con severidad 'error'.")
-        return 1
-    print("\n⚠️ Solo hallazgos con severidad 'warning'.")
-    return 0
+        audited_any = True
+        for walk_root, _, files in os.walk(root_dir):
+            # Ignora .github y .config en cualquier nivel
+            parts = Path(walk_root).parts
+            if ".github" in parts or ".config" in parts:
+                continue
+
+            for name in files:
+                if not name.lower().endswith(".sql"):
+                    continue
+                full = Path(walk_root, name).resolve()
+                rel_print = str(full)
+
+                res = audit_file(full, cfg, compile_special_chars_pattern(cfg, repo_root))
+                has_any = any([res["nolock"], res["special"], res["global"], res["temp"],
+                               res["curs"], res["funcs"], res["warn"], res["select_star"], res["select_top"]])
+                if not has_any:
+                    continue
+
+                print(f"\n📄 Archivo: {rel_print}")
+
+                # Muestra por regla según severidad y levanta bandera de error si corresponde
+                def show(rule_key: str, title: str, items: list[str]):
+                    if not items:
+                        return
+                    severity = sev(cfg, rule_key)
+                    if severity == "off":
+                        return
+                    print(f"{badge(severity)} {title}")
+                    for it in items:
+                        print(it)
+                    if severity == "error":
+                        nonlocal any_issue_as_error
+                        any_issue_as_error = True
+
+                show("nolock", "NOLOCK ausente:", res["nolock"])
+                show("special_chars", "Caracteres especiales encontrados:", res["special"])
+                show("global_temp", "Uso de tablas globales (##):", res["global"])
+                show("temp_names", "Nombres genéricos en tablas temporales:", res["temp"])
+                show("cursors", "Uso de cursores:", res["curs"])
+                show("user_functions", "Funciones de usuario dentro del WHERE:", res["funcs"])
+                show("inner_join_where", "INNER JOIN + WHERE sin variantes:", res["warn"])
+                show("select_star", "SELECT * detectado:", res["select_star"])
+                show("select_top", "SELECT TOP detectado:", res["select_top"])
+
+    if not audited_any:
+        print("\n⚠️  No se auditó ningún directorio (revisa [paths] sql_roots).")
+        return
+
+    if any_issue_as_error:
+        print("\n❌ Se encontraron errores en uno o más archivos SQL")
+        sys.exit(1)
+    else:
+        print("\n✅ Auditoría finalizada sin errores (sólo warnings o sin hallazgos).")
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
