@@ -1,12 +1,12 @@
--- ===== PROBAR special_chars (caracteres especiales)
-CREATE TABLE [ventas]
+-- ===== PROBAR special_chars
+CREATE TABLE [ventas$]
 (
     id INT,
     descripcion NVARCHAR(100)
 );
 GO
 
--- ===== PROBAR deprecated_types (TEXT/NTEXT/IMAGE)
+-- ===== PROBAR deprecated_types
 CREATE TABLE dbo.DeprecatedDemo
 (
     oldText TEXT,
@@ -15,14 +15,14 @@ CREATE TABLE dbo.DeprecatedDemo
 );
 GO
 
--- ===== PROBAR global_temp (##)
+-- ===== PROBAR global_temp
 CREATE TABLE ##global_temp_example
 (
     id INT
 );
 GO
 
--- ===== PROBAR temp_names (nombres genricos)
+-- ===== PROBAR temp_names
 DECLARE @temp TABLE (id INT);
 CREATE TABLE #temp
 (
@@ -39,13 +39,13 @@ CLOSE c;
 DEALLOCATE c;
 GO
 
--- ===== PROBAR user_functions (en WHERE)
+-- ===== PROBAR user_functions
 SELECT id
 FROM dbo.Clientes
 WHERE dbo.fn_es_activo(id) = 1;
 GO
 
--- ===== PROBAR scalar_udf_in_select_where (SELECT y WHERE)
+-- ===== PROBAR scalar_udf_in_select_where
 SELECT dbo.fn_calcula_descuento(monto) AS desc_calc
 FROM dbo.Ordenes o
 WHERE dbo.fn_valida_credito(o.clienteId) = 1;
@@ -53,7 +53,7 @@ GO
 
 -- ===== PROBAR select_star
 SELECT *
-FROM dbo.Productos; -- falta NOLOCK aqu tambin
+FROM dbo.Productos; -- Falta NOLOCK aquí también
 GO
 
 -- ===== PROBAR select_top + top_without_order_by
@@ -62,12 +62,12 @@ SELECT TOP 10
 FROM dbo.Productos p; -- sin ORDER BY
 GO
 
--- ===== PROBAR nolock (debe exigir WITH (NOLOCK); saltará sys.* y #/@)
+-- ===== PROBAR nolock
 SELECT p.Id, p.Nombre
 FROM dbo.Productos p INNER JOIN dbo.Categorias c ON c.Id = p.CategoriaId;
 GO
 
--- ===== PROBAR inner_join_where (mltiples INNER JOIN + WHERE sin variantes)
+-- ===== PROBAR inner_join_where
 SELECT p.Id, c.Nombre, m.Nombre
 FROM dbo.Productos p
     INNER JOIN dbo.Categorias c ON c.Id = p.CategoriaId
@@ -75,13 +75,13 @@ FROM dbo.Productos p
 WHERE p.Activo = 1;
 GO
 
--- ===== PROBAR select_distinct_no_justification (SIN comentario de justificacin)
+-- ===== PROBAR select_distinct_no_justification (SIN comentario)
 SELECT DISTINCT p.CategoriaId
 FROM dbo.Productos p;
 GO
 
--- ===== PROBAR select_distinct_no_justification (CON justificacin - NO debe caer)
--- justification: Consolidamos resultados por categora para reporte semestral
+-- ===== PROBAR select_distinct_no_justification (CON justificación)
+-- justification: Consolidamos resultados por categoría para reporte semestral
 SELECT DISTINCT p.CategoriaId
 FROM dbo.Productos p
 WHERE p.Activo = 1;
@@ -95,9 +95,9 @@ GO
 -- ===== PROBAR exec_dynamic_sql_unparameterized
 DECLARE @col NVARCHAR(50) = 'Nombre';
 DECLARE @sql NVARCHAR(MAX) = 'SELECT ' + @col + ' FROM dbo.Productos';
--- concatenacin
+-- concatenación
 EXEC(@sql);
-EXEC sp_executesql @sql; -- concatenacin previa
+EXEC sp_executesql @sql; -- concatenación previa
 GO
 
 -- ===== PROBAR select_into_heavy
@@ -106,7 +106,7 @@ INTO #tmpProductos
 FROM dbo.Productos p;
 GO
 
--- ===== PROBAR hint_usage_general (WITH INDEX, OPTION(RECOMPILE), JOIN hints)
+-- ===== PROBAR hint_usage_general
 SELECT p.Id
 FROM dbo.Productos p WITH (INDEX(IX_Productos_Nombre))
     INNER LOOP JOIN dbo.Categorias c ON c.Id = p.CategoriaId

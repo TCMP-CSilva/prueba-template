@@ -1,28 +1,33 @@
-name: Auditoría SQL (NOLOCK & reglas)
+name: SQL Standards Audit
 
 on:
-  push:
-    paths:
-      - '**/*.sql'
-      - '.github/audit/**'
-      - '.github/workflows/sql-audit.yml'
   pull_request:
     paths:
-      - '**/*.sql'
-      - '.github/audit/**'
-      - '.github/workflows/sql-audit.yml'
+      - "**/*.sql"
+      - ".github/audit/**"
+  push:
+    branches: [ main, develop ]
+    paths:
+      - "**/*.sql"
+      - ".github/audit/**"
 
 jobs:
-  audit-sql:
+  audit:
     runs-on: ubuntu-latest
     steps:
-      - name: 🧾 Checkout
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 🐍 Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: Show Python
+        run: python --version
 
-      - name: 🔍 Ejecutar auditoría
-        run: python .github/audit/audit_sql_standards.py
+      - name: Run SQL Audit
+        run: |
+          python .github/audit/audit_sql_standards.py | tee audit_output.txt
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-audit-report
+          path: audit_output.txt
