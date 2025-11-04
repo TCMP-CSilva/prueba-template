@@ -59,7 +59,8 @@ GO
 -- ===== PROBAR select_top + top_without_order_by
 SELECT TOP 10
     p.Id, p.Nombre
-FROM dbo.Productos p; -- sin ORDER BY
+FROM dbo.Productos p
+ORDER BY p.Nombre
 GO
 
 -- ===== PROBAR nolock (debe exigir WITH (NOLOCK); saltará sys.* y #/@)
