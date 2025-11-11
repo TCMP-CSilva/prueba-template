@@ -12,6 +12,7 @@ CREATE TABLE dbo.DeprecatedDemo
     oldText TEXT,
     oldImage IMAGE,
     oldNtext NTEXT
+
 );
 GO
 
@@ -21,6 +22,8 @@ CREATE TABLE ##global_temp_example
     id INT
 );
 GO
+
+
 
 -- ===== PROBAR temp_names (nombres genricos)
 DECLARE @temp TABLE (id INT);
