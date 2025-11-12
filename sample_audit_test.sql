@@ -25,6 +25,7 @@ GO
 
 
 
+
 -- ===== PROBAR temp_names (nombres genricos)
 DECLARE @temp TABLE (id INT);
 CREATE TABLE #temp
