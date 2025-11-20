@@ -16,12 +16,14 @@ CREATE TABLE dbo.DeprecatedDemo
 );
 GO
 
+
 -- ===== PROBAR global_temp (##)
 CREATE TABLE ##global_temp_example
 (
     id INT
 );
 GO
+
 
 
 
