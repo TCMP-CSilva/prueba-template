@@ -71,13 +71,13 @@ bad_temp_names_pattern = re.compile(r"(#temp|@temp)\b", re.IGNORECASE)
 cursor_pattern = re.compile(r"\bCURSOR\b", re.IGNORECASE)
 user_function_in_where_pattern = re.compile(r"WHERE\s+.*?\b(?:dbo|db|schema|owner)\.\w+\s*\(.*?\)", re.IGNORECASE)
 
-# UDF (genérico) en SELECT/WHERE (para regla scalar_udf_in_select_where)
+# UDF (genérico) en SELECT/WHERE
 udf_call_pattern = re.compile(r"\b(?:\w+\.){0,2}\w+\s*\(", re.IGNORECASE)
 
-# Tipos deprecados (para regla deprecated_types)
+# Tipos deprecados
 deprecated_types_pattern = re.compile(r"\b(TEXT|NTEXT|IMAGE)\b", re.IGNORECASE)
 
-# Hints generales comunes (para regla hint_usage_general)
+# Hints generales
 hints_pattern = re.compile(
     r"\bWITH\s*\(\s*INDEX\s*\(|\bFORCESEEK\b|\bFAST\s+\d+\b|\b(LOOP|HASH|MERGE)\s+JOIN\b|\bOPTION\s*\((?:[^)]*)\)",
     re.IGNORECASE
@@ -138,18 +138,43 @@ def check_nolock(lines):
 
     # 1) Detectar nombres de CTE definidos en el script
     cte_names = set()
+    pending_cte_name = None
+
     for ln in lines:
-        # Primer CTE: WITH NombreCte AS (
-        m = re.search(r"\bWITH\s+([A-Za-z_][\w]*)\s+AS\s*\(", ln, re.IGNORECASE)
+        line = ln.strip()
+
+        # Caso 1: WITH Cte AS (
+        m = re.search(r"\bWITH\s+([A-Za-z_][\w]*)\s+AS\s*\(", line, re.IGNORECASE)
         if m:
             cte_names.add(m.group(1).lower())
-        # CTEs adicionales encadenados: , OtraCte AS (
-        m2 = re.search(r"^\s*,\s*([A-Za-z_][\w]*)\s+AS\s*\(", ln, re.IGNORECASE)
-        if m2:
-            cte_names.add(m2.group(1).lower())
+            continue
+
+        # Caso 2: ;WITH Cte AS (
+        m = re.search(r";\s*WITH\s+([A-Za-z_][\w]*)\s+AS\s*\(", line, re.IGNORECASE)
+        if m:
+            cte_names.add(m.group(1).lower())
+            continue
+
+        # Caso 3: WITH / ;WITH en una línea y nombre de CTE en la siguiente
+        if re.match(r"(^WITH$|^;WITH$)", line, re.IGNORECASE):
+            pending_cte_name = True
+            continue
+
+        if pending_cte_name:
+            m = re.match(r"([A-Za-z_][\w]*)$", line)
+            if m:
+                cte_names.add(m.group(1).lower())
+                pending_cte_name = None
+                continue
+
+        # Caso 4: CTEs encadenadas: , OtraCte AS (
+        m = re.match(r",\s*([A-Za-z_][\w]*)\s+AS\s*\(", line, re.IGNORECASE)
+        if m:
+            cte_names.add(m.group(1).lower())
+            continue
 
     # 2) Excepciones contextuales:
-    #    - SELECT dentro de cursores (DECLARE ... CURSOR FOR ...)
+    #    - SELECT dentro de cursores
     #    - Bloques DML: INSERT / UPDATE / DELETE
     ignore_cursor_block = False
     ignore_dml_block = False
@@ -193,7 +218,7 @@ def check_nolock(lines):
         if m:
             raw_table = m.group(2)
 
-            # Normalizar nombre para comparar con CTEs (nos quedamos con la última parte)
+            # Normalizar nombre para comparar con CTEs (último componente)
             norm = raw_table.strip().strip("[]").split(".")[-1].lower()
 
             # Excluir referencias a CTEs
@@ -240,13 +265,19 @@ def check_user_funcs(lines):
 
 def check_inner_join_warnings(lines):
     issues = []
-    join_count = 0; first_join = None; has_variant = False; in_block = False
+    join_count = 0
+    first_join = None
+    has_variant = False
+    in_block = False
     for i, ln in enumerate(lines, 1):
         line = ln.strip()
         if not line or line.startswith("--"):
             continue
         if re.search(r"\bSELECT\b", line, re.IGNORECASE):
-            join_count = 0; first_join = None; has_variant = False; in_block = True
+            join_count = 0
+            first_join = None
+            has_variant = False
+            in_block = True
         if not in_block:
             continue
         if re.search(r"\bINNER\s+JOIN\b", line, re.IGNORECASE):
@@ -258,18 +289,28 @@ def check_inner_join_warnings(lines):
         if re.search(r"\bWHERE\b", line, re.IGNORECASE):
             if join_count > 1 and not has_variant and first_join is not None:
                 issues.append(f"   Línea {first_join}: Múltiples INNER JOIN + WHERE sin variantes")
-            in_block = False; join_count = 0; has_variant = False; first_join = None
+            in_block = False
+            join_count = 0
+            has_variant = False
+            first_join = None
         if re.search(r";\s*$", line):
-            in_block = False; join_count = 0; has_variant = False; first_join = None
+            in_block = False
+            join_count = 0
+            has_variant = False
+            first_join = None
     return issues
 
 def check_select_star(lines):
     issues = []
-    buffering = False; buf = []; start_line = None
+    buffering = False
+    buf = []
+    start_line = None
     for i, ln in enumerate(lines, 1):
         line = ln.split("--", 1)[0]
         if not buffering and re.search(r"\bSELECT\b", line, re.IGNORECASE):
-            buffering = True; start_line = i; buf = [line]
+            buffering = True
+            start_line = i
+            buf = [line]
             if re.search(r"\bFROM\b", line, re.IGNORECASE):
                 buffering = False
                 joined = " ".join(buf)
@@ -291,11 +332,15 @@ def check_select_star(lines):
 
 def check_select_top(lines):
     issues = []
-    buffering = False; buf = []; start_line = None
+    buffering = False
+    buf = []
+    start_line = None
     for i, ln in enumerate(lines, 1):
         line = ln.split("--", 1)[0]
         if not buffering and re.search(r"\bSELECT\b", line, re.IGNORECASE):
-            buffering = True; start_line = i; buf = [line]
+            buffering = True
+            start_line = i
+            buf = [line]
             if re.search(r"\bFROM\b", line, re.IGNORECASE):
                 buffering = False
                 joined = " ".join(buf)
@@ -315,16 +360,17 @@ def check_select_top(lines):
                 buf = []
     return issues
 
-# -----------------------------
-# Reglas nuevas
-# -----------------------------
 def check_top_without_order_by(lines):
     issues = []
-    buffering = False; buf=[]; start_line=None
+    buffering = False
+    buf = []
+    start_line = None
     for i, ln in enumerate(lines, 1):
-        line = ln.split("--",1)[0]
+        line = ln.split("--", 1)[0]
         if not buffering and re.search(r"\bSELECT\b", line, re.IGNORECASE):
-            buffering=True; buf=[line]; start_line=i
+            buffering = True
+            buf = [line]
+            start_line = i
             continue
         if buffering:
             buf.append(line)
@@ -332,18 +378,26 @@ def check_top_without_order_by(lines):
                 stmt = " ".join(buf)
                 if re.search(r"\bSELECT\s+TOP\b", stmt, re.IGNORECASE) and not re.search(r"\bORDER\s+BY\b", stmt, re.IGNORECASE):
                     issues.append(f"   Línea {start_line}: SELECT TOP sin ORDER BY determinista")
-                buffering=False; buf=[]; start_line=None
+                buffering = False
+                buf = []
+                start_line = None
     return issues
 
 def check_delete_update_without_where(lines):
     issues = []
-    buffering=False; buf=[]; start_line=None; kind=None
+    buffering = False
+    buf = []
+    start_line = None
+    kind = None
     for i, ln in enumerate(lines, 1):
-        line = ln.split("--",1)[0]
+        line = ln.split("--", 1)[0]
         if not buffering:
             m = re.search(r"\b(DELETE|UPDATE)\b", line, re.IGNORECASE)
             if m:
-                kind = m.group(1).upper(); buffering=True; buf=[line]; start_line=i
+                kind = m.group(1).upper()
+                buffering = True
+                buf = [line]
+                start_line = i
                 continue
         else:
             buf.append(line)
@@ -351,16 +405,19 @@ def check_delete_update_without_where(lines):
                 stmt = " ".join(buf)
                 if not re.search(r"\bWHERE\b", stmt, re.IGNORECASE):
                     issues.append(f"   Línea {start_line}: {kind} sin cláusula WHERE")
-                buffering=False; buf=[]; start_line=None; kind=None
+                buffering = False
+                buf = []
+                start_line = None
+                kind = None
     return issues
 
 def check_merge_usage(lines):
-    return [f"   Línea {i}: {ln.strip()}" for i, ln in enumerate(lines,1)
+    return [f"   Línea {i}: {ln.strip()}" for i, ln in enumerate(lines, 1)
             if not ln.strip().startswith('--') and re.search(r"\bMERGE\b", ln, re.IGNORECASE)]
 
 def check_select_distinct_no_justification(lines):
-    issues=[]
-    for i, ln in enumerate(lines,1):
+    issues = []
+    for i, ln in enumerate(lines, 1):
         if re.search(r"\bSELECT\s+DISTINCT\b", ln, re.IGNORECASE):
             prev = lines[i-2:i-1] + lines[i-1:i]
             snippet = " ".join(prev + [ln])
@@ -369,7 +426,7 @@ def check_select_distinct_no_justification(lines):
     return issues
 
 def check_exec_dynamic_sql_unparameterized(lines):
-    issues=[]
+    issues = []
     joined = "\n".join(lines)
     pattern = re.compile(
         r"\bEXEC(?:UTE)?\b\s*(?:sp_executesql)?\s*\((?:[^)]*\+[^)]*)\)|"
@@ -377,14 +434,14 @@ def check_exec_dynamic_sql_unparameterized(lines):
         re.IGNORECASE | re.DOTALL
     )
     for m in pattern.finditer(joined):
-        pos = joined[:m.start()].count("\n")+1
+        pos = joined[:m.start()].count("\n") + 1
         issues.append(f"   Línea {pos}: SQL dinámico con concatenación no parametrizada")
     return issues
 
 def check_select_into_heavy(lines):
-    issues=[]
-    for i, ln in enumerate(lines,1):
-        line = ln.split("--",1)[0]
+    issues = []
+    for i, ln in enumerate(lines, 1):
+        line = ln.split("--", 1)[0]
         if re.search(r"\bSELECT\b.*\bINTO\b\s+#\w+", line, re.IGNORECASE):
             issues.append(f"   Línea {i}: SELECT INTO #temp; recomienda CREATE TABLE + INSERT para control de tipos/índices")
     return issues
@@ -398,7 +455,7 @@ def check_scalar_udf_in_select_where(lines):
     for i, ln in enumerate(lines, 1):
         if ln.strip().startswith("--"):
             continue
-        l = ln.split("--",1)[0]
+        l = ln.split("--", 1)[0]
         if re.search(r"\bSELECT\b", l, re.IGNORECASE) or re.search(r"\bWHERE\b", l, re.IGNORECASE):
             if udf_call_pattern.search(l):
                 issues.append(f"   Línea {i}: Posible UDF escalar en SELECT/WHERE -> {l.strip()}")
@@ -543,12 +600,12 @@ def main():
 
                 # Tamaño máximo de archivo (MB)
                 try:
-                    max_mb = float(cfg.get('paths','max_file_size_mb', fallback='5'))
+                    max_mb = float(cfg.get('paths', 'max_file_size_mb', fallback='5'))
                 except Exception:
                     max_mb = 5.0
-                size_mb = (full.stat().st_size / (1024*1024)) if full.exists() else 0
+                size_mb = (full.stat().st_size / (1024 * 1024)) if full.exists() else 0
                 if size_mb > max_mb:
-                    # print(f"Se omite por tamaño ({size_mb:.2f} MB > {max_mb} MB): {rel_print}")
+                    # Se omite por tamaño, pero no es error
                     continue
 
                 res = audit_file(full, cfg, special_chars_re)
