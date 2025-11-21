@@ -72,7 +72,7 @@ cursor_pattern = re.compile(r"\bCURSOR\b", re.IGNORECASE)
 user_function_in_where_pattern = re.compile(r"WHERE\s+.*?\b(?:dbo|db|schema|owner)\.\w+\s*\(.*?\)", re.IGNORECASE)
 
 # UDF (genérico) en SELECT/WHERE (para regla 10)
-udf_call_pattern = re.compile(r"\b(?:\w+\.){0,2}\w+\s*\(", re.IGNORECASE)  # dobles/triples partes + (
+udf_call_pattern = re.compile(r"\b(?:\w+\.){0,2}\w+\s*\(", re.IGNORECASE)
 
 # Tipos deprecados (para regla 13)
 deprecated_types_pattern = re.compile(r"\b(TEXT|NTEXT|IMAGE)\b", re.IGNORECASE)
@@ -118,28 +118,41 @@ def compile_special_chars_pattern(cfg, repo_root: Path) -> re.Pattern:
     return re.compile(alt, re.IGNORECASE)
 
 # -----------------------------
-# Reglas (existentes)
+# Reglas
 # -----------------------------
 def rule_enabled(cfg, key, default=True):
     return cfg.getboolean("rules", key, fallback=default)
 
 def check_nolock(lines):
     issues = []
-    # Ignorar cualquier SELECT que forme parte de un cursor
+    # Excepciones contextuales:
+    # - SELECT dentro de cursores (DECLARE ... CURSOR FOR ...)
+    # - Bloques DML: INSERT / UPDATE / DELETE
     ignore_cursor_block = False
+    ignore_dml_block = False
 
     for i, ln in enumerate(lines, 1):
         line = ln.rstrip("\n")
 
-        # Detectar inicio de un cursor: DECLARE <algo> CURSOR FOR
+        # Detectar inicio de cursor
         if re.search(r"\bDECLARE\s+\w+\s+CURSOR\s+FOR\b", line, re.IGNORECASE):
             ignore_cursor_block = True
 
-        # Si estamos dentro del bloque de cursor, no auditamos NOLOCK
+        # Detectar inicio de bloque DML (INSERT/UPDATE/DELETE)
+        if re.search(r"\b(INSERT|UPDATE|DELETE)\b", line, re.IGNORECASE):
+            ignore_dml_block = True
+
+        # Si estamos dentro de un bloque cursor, no auditamos NOLOCK
         if ignore_cursor_block:
-            # Consideramos fin de bloque cursor cuando encontramos GO o una línea vacía
             if re.search(r"^\s*GO\s*$", line, re.IGNORECASE) or line.strip() == "":
                 ignore_cursor_block = False
+            continue
+
+        # Si estamos dentro de un bloque DML, tampoco auditamos NOLOCK
+        if ignore_dml_block:
+            # Fin de bloque DML: ; o GO o línea en blanco
+            if ";" in line or re.search(r"^\s*GO\s*$", line, re.IGNORECASE) or line.strip() == "":
+                ignore_dml_block = False
             continue
 
         l = line.strip()
