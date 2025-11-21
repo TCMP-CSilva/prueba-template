@@ -73,8 +73,10 @@ user_function_in_where_pattern = re.compile(r"WHERE\s+.*?\b(?:dbo|db|schema|owne
 
 # UDF (genérico) en SELECT/WHERE (para regla 10)
 udf_call_pattern = re.compile(r"\b(?:\w+\.){0,2}\w+\s*\(", re.IGNORECASE)  # dobles/triples partes + (
+
 # Tipos deprecados (para regla 13)
 deprecated_types_pattern = re.compile(r"\b(TEXT|NTEXT|IMAGE)\b", re.IGNORECASE)
+
 # Hints generales comunes (para regla 14)
 hints_pattern = re.compile(
     r"\bWITH\s*\(\s*INDEX\s*\(|\bFORCESEEK\b|\bFAST\s+\d+\b|\b(LOOP|HASH|MERGE)\s+JOIN\b|\bOPTION\s*\((?:[^)]*)\)",
@@ -123,20 +125,47 @@ def rule_enabled(cfg, key, default=True):
 
 def check_nolock(lines):
     issues = []
+    # Ignorar cualquier SELECT que forme parte de un cursor
+    ignore_cursor_block = False
+
     for i, ln in enumerate(lines, 1):
-        l = ln.strip()
-        if l.startswith("--") or ignore_temp_tables_pattern.search(ln):
+        line = ln.rstrip("\n")
+
+        # Detectar inicio de un cursor: DECLARE <algo> CURSOR FOR
+        if re.search(r"\bDECLARE\s+\w+\s+CURSOR\s+FOR\b", line, re.IGNORECASE):
+            ignore_cursor_block = True
+
+        # Si estamos dentro del bloque de cursor, no auditamos NOLOCK
+        if ignore_cursor_block:
+            # Consideramos fin de bloque cursor cuando encontramos GO o una línea vacía
+            if re.search(r"^\s*GO\s*$", line, re.IGNORECASE) or line.strip() == "":
+                ignore_cursor_block = False
             continue
-        if nolock_pattern.search(ln) or nolock_paren_only_pattern.search(ln):
+
+        l = line.strip()
+
+        # Comentarios o FROM sobre temporales/variables se omiten
+        if l.startswith("--") or ignore_temp_tables_pattern.search(line):
             continue
-        m = re.search(r"\b(FROM|JOIN)\s+([\w.\[\]]+)", ln, re.IGNORECASE)
+
+        # Si ya tiene NOLOCK/READUNCOMMITTED, no reportamos
+        if nolock_pattern.search(line) or nolock_paren_only_pattern.search(line):
+            continue
+
+        # Detectar FROM/JOIN tabla física
+        m = re.search(r"\b(FROM|JOIN)\s+([\w.\[\]]+)", line, re.IGNORECASE)
         if m:
             table = m.group(2)
+            # Excluir sys.*, sysobjects
             if is_sys_table(table):
                 continue
+            # Excluir temporales (#) y variables (@)
             if re.match(r"[#@]", table):
                 continue
-            issues.append(f"   Línea {i}: Falta hint WITH (NOLOCK) en {m.group(1).upper()} tabla '{table}'")
+            issues.append(
+                f"   Línea {i}: Falta hint WITH (NOLOCK) en {m.group(1).upper()} tabla '{table}'"
+            )
+
     return issues
 
 def check_special_chars(lines, special_chars_re):
@@ -241,7 +270,7 @@ def check_select_top(lines):
     return issues
 
 # -----------------------------
-# Reglas nuevas (ya activadas)
+# Reglas nuevas
 # -----------------------------
 def check_top_without_order_by(lines):
     issues = []
@@ -310,11 +339,10 @@ def check_select_into_heavy(lines):
             issues.append(f"   Línea {i}: SELECT INTO #temp; recomienda CREATE TABLE + INSERT para control de tipos/índices")
     return issues
 
-# ---- Nuevas (pedido actual): 10, 13, 14
 def check_scalar_udf_in_select_where(lines):
     """
     Detecta llamadas a UDF escalares en SELECT/WHERE: p.ej. dbo.fn(...), schema.fn(...).
-    (Heurística: cualquier identificador 1-3 partes seguido de '(' que no sea palabra clave típica.)
+    (Heurística: cualquier identificador 1-3 partes seguido de '(')
     """
     issues = []
     for i, ln in enumerate(lines, 1):
@@ -322,7 +350,6 @@ def check_scalar_udf_in_select_where(lines):
             continue
         l = ln.split("--",1)[0]
         if re.search(r"\bSELECT\b", l, re.IGNORECASE) or re.search(r"\bWHERE\b", l, re.IGNORECASE):
-            # Evitar funciones nativas comunes? (heurística básica: de momento no; revisión manual)
             if udf_call_pattern.search(l):
                 issues.append(f"   Línea {i}: Posible UDF escalar en SELECT/WHERE -> {l.strip()}")
     return issues
@@ -390,7 +417,6 @@ def audit_file(fp: Path, cfg: configparser.ConfigParser, special_chars_re: re.Pa
     if rule_enabled(cfg, "select_top", True):
         res["select_top"] = check_select_top(lines)
 
-    # nuevas ya activadas en la entrega anterior
     if rule_enabled(cfg, "top_without_order_by", True):
         res["top_without_order_by"] = check_top_without_order_by(lines)
     if rule_enabled(cfg, "delete_update_without_where", True):
@@ -404,7 +430,6 @@ def audit_file(fp: Path, cfg: configparser.ConfigParser, special_chars_re: re.Pa
     if rule_enabled(cfg, "select_into_heavy", True):
         res["select_into_heavy"] = check_select_into_heavy(lines)
 
-    # nuevas de este pedido
     if rule_enabled(cfg, "scalar_udf_in_select_where", True):
         res["scalar_udf_in_select_where"] = check_scalar_udf_in_select_where(lines)
     if rule_enabled(cfg, "deprecated_types", True):
@@ -490,7 +515,6 @@ def main():
                 if not has_any:
                     print("   (sin hallazgos)")
 
-                # Mostrar por regla y recoger si hay 'error'
                 any_issue_as_error |= show("nolock", "Falta WITH (NOLOCK) en FROM/JOIN:", res["nolock"], cfg)
                 any_issue_as_error |= show("special_chars", "Caracteres especiales no permitidos:", res["special"], cfg)
                 any_issue_as_error |= show("global_temp", "Uso de tabla temporal global (##):", res["global"], cfg)
