@@ -1,18 +1,3 @@
-
----
-
-## 2️⃣ `audit_sql_standards.py` con excepción para UPDATE/DELETE en @ y #
-
-Te dejo el script completo con la **única modificación importante** en la función `check_delete_update_without_where`, que ahora ignora:
-
-- `UPDATE @TablaVariable`
-- `UPDATE #TablaTemporal`
-- `DELETE FROM @TablaVariable`
-- `DELETE FROM #TablaTemporal`
-
-Copia esto en `.github/audit/audit_sql_standards.py`:
-
-```python
 import os
 import re
 import sys
@@ -399,38 +384,17 @@ def check_top_without_order_by(lines):
     return issues
 
 def check_delete_update_without_where(lines):
-    """
-    Detecta DELETE/UPDATE sin WHERE sobre tablas físicas.
-    Excepciones:
-      - UPDATE @TablaVariable
-      - UPDATE #TablaTemporal
-      - DELETE FROM @TablaVariable
-      - DELETE FROM #TablaTemporal
-    """
     issues = []
     buffering = False
     buf = []
     start_line = None
     kind = None
-
     for i, ln in enumerate(lines, 1):
         line = ln.split("--", 1)[0]
-
         if not buffering:
             m = re.search(r"\b(DELETE|UPDATE)\b", line, re.IGNORECASE)
             if m:
                 kind = m.group(1).upper()
-
-                # Excepciones: DML sobre tablas variables (@) o temporales (#)
-                if re.search(r"\bUPDATE\s+@[A-Za-z_][\w]*\b", line, re.IGNORECASE):
-                    continue
-                if re.search(r"\bUPDATE\s+#\w+\b", line, re.IGNORECASE):
-                    continue
-                if re.search(r"\bDELETE\s+FROM\s+@[A-Za-z_][\w]*\b", line, re.IGNORECASE):
-                    continue
-                if re.search(r"\bDELETE\s+FROM\s+#\w+\b", line, re.IGNORECASE):
-                    continue
-
                 buffering = True
                 buf = [line]
                 start_line = i
@@ -445,7 +409,6 @@ def check_delete_update_without_where(lines):
                 buf = []
                 start_line = None
                 kind = None
-
     return issues
 
 def check_merge_usage(lines):
