@@ -71,13 +71,13 @@ bad_temp_names_pattern = re.compile(r"(#temp|@temp)\b", re.IGNORECASE)
 cursor_pattern = re.compile(r"\bCURSOR\b", re.IGNORECASE)
 user_function_in_where_pattern = re.compile(r"WHERE\s+.*?\b(?:dbo|db|schema|owner)\.\w+\s*\(.*?\)", re.IGNORECASE)
 
-# UDF (genérico) en SELECT/WHERE (para regla 10)
+# UDF (genérico) en SELECT/WHERE (para regla scalar_udf_in_select_where)
 udf_call_pattern = re.compile(r"\b(?:\w+\.){0,2}\w+\s*\(", re.IGNORECASE)
 
-# Tipos deprecados (para regla 13)
+# Tipos deprecados (para regla deprecated_types)
 deprecated_types_pattern = re.compile(r"\b(TEXT|NTEXT|IMAGE)\b", re.IGNORECASE)
 
-# Hints generales comunes (para regla 14)
+# Hints generales comunes (para regla hint_usage_general)
 hints_pattern = re.compile(
     r"\bWITH\s*\(\s*INDEX\s*\(|\bFORCESEEK\b|\bFAST\s+\d+\b|\b(LOOP|HASH|MERGE)\s+JOIN\b|\bOPTION\s*\((?:[^)]*)\)",
     re.IGNORECASE
@@ -124,10 +124,33 @@ def rule_enabled(cfg, key, default=True):
     return cfg.getboolean("rules", key, fallback=default)
 
 def check_nolock(lines):
+    """
+    Regla NOLOCK:
+      - Exige WITH (NOLOCK) en FROM/JOIN sobre tablas físicas.
+      - EXCEPCIONES:
+          * Tablas sys.* y sysobjects
+          * Tablas temporales # y variables @
+          * SELECT dentro de cursores (DECLARE ... CURSOR FOR)
+          * Bloques DML: INSERT / UPDATE / DELETE
+          * Referencias a CTEs definidas con WITH/AS
+    """
     issues = []
-    # Excepciones contextuales:
-    # - SELECT dentro de cursores (DECLARE ... CURSOR FOR ...)
-    # - Bloques DML: INSERT / UPDATE / DELETE
+
+    # 1) Detectar nombres de CTE definidos en el script
+    cte_names = set()
+    for ln in lines:
+        # Primer CTE: WITH NombreCte AS (
+        m = re.search(r"\bWITH\s+([A-Za-z_][\w]*)\s+AS\s*\(", ln, re.IGNORECASE)
+        if m:
+            cte_names.add(m.group(1).lower())
+        # CTEs adicionales encadenados: , OtraCte AS (
+        m2 = re.search(r"^\s*,\s*([A-Za-z_][\w]*)\s+AS\s*\(", ln, re.IGNORECASE)
+        if m2:
+            cte_names.add(m2.group(1).lower())
+
+    # 2) Excepciones contextuales:
+    #    - SELECT dentro de cursores (DECLARE ... CURSOR FOR ...)
+    #    - Bloques DML: INSERT / UPDATE / DELETE
     ignore_cursor_block = False
     ignore_dml_block = False
 
@@ -168,15 +191,25 @@ def check_nolock(lines):
         # Detectar FROM/JOIN tabla física
         m = re.search(r"\b(FROM|JOIN)\s+([\w.\[\]]+)", line, re.IGNORECASE)
         if m:
-            table = m.group(2)
+            raw_table = m.group(2)
+
+            # Normalizar nombre para comparar con CTEs (nos quedamos con la última parte)
+            norm = raw_table.strip().strip("[]").split(".")[-1].lower()
+
+            # Excluir referencias a CTEs
+            if norm in cte_names:
+                continue
+
             # Excluir sys.*, sysobjects
-            if is_sys_table(table):
+            if is_sys_table(raw_table):
                 continue
+
             # Excluir temporales (#) y variables (@)
-            if re.match(r"[#@]", table):
+            if re.match(r"[#@]", raw_table):
                 continue
+
             issues.append(
-                f"   Línea {i}: Falta hint WITH (NOLOCK) en {m.group(1).upper()} tabla '{table}'"
+                f"   Línea {i}: Falta hint WITH (NOLOCK) en {m.group(1).upper()} tabla '{raw_table}'"
             )
 
     return issues
@@ -338,7 +371,11 @@ def check_select_distinct_no_justification(lines):
 def check_exec_dynamic_sql_unparameterized(lines):
     issues=[]
     joined = "\n".join(lines)
-    pattern = re.compile(r"\bEXEC(?:UTE)?\b\s*(?:sp_executesql)?\s*\((?:[^)]*\+[^)]*)\)|\bsp_executesql\b\s+@?\w+\s*=.*\+.*", re.IGNORECASE|re.DOTALL)
+    pattern = re.compile(
+        r"\bEXEC(?:UTE)?\b\s*(?:sp_executesql)?\s*\((?:[^)]*\+[^)]*)\)|"
+        r"\bsp_executesql\b\s+@?\w+\s*=.*\+.*",
+        re.IGNORECASE | re.DOTALL
+    )
     for m in pattern.finditer(joined):
         pos = joined[:m.start()].count("\n")+1
         issues.append(f"   Línea {pos}: SQL dinámico con concatenación no parametrizada")
