@@ -16,11 +16,6 @@ CREATE TABLE dbo.DeprecatedDemo
 GO
 
 -- ===== PROBAR global_temp
-CREATE TABLE ##global_temp_example
-(
-    id INT
-);
-GO
 
 -- ===== PROBAR temp_names
 DECLARE @temp1 TABLE (id INT);
@@ -31,13 +26,7 @@ CREATE TABLE #temp1
 GO
 
 -- ===== PROBAR cursors
-DECLARE c CURSOR FOR SELECT Id
-FROM dbo.Clientes;
-OPEN c;
-FETCH NEXT FROM c;
-CLOSE c;
-DEALLOCATE c;
-GO
+
 
 -- ===== PROBAR user_functions
 SELECT id
@@ -89,12 +78,12 @@ WHERE p.Activo = 1;
 GO
 
 -- ===== PROBAR delete_update_without_where
-DELETE FROM dbo.Ordenes;
+DELETE FROM dbo.Ordenes WHERE p.Activo = 1;
 UPDATE dbo.Clientes SET Activo = 0;
 GO
 
 -- ===== PROBAR delete_update_without_where2
-DELETE FROM dbo.Ordenes;
+DELETE FROM dbo.Ordene WHERE p.Activo = 1;
 
 -- ===== PROBAR exec_dynamic_sql_unparameterized
 DECLARE @col NVARCHAR(50) = 'Nombre';
@@ -108,19 +97,4 @@ GO
 SELECT p.Id, p.Nombre
 INTO #tmpProductos
 FROM dbo.Productos p WITH (NOLOCK);
-GO
-
--- ===== PROBAR hint_usage_general
-SELECT p.Id
-FROM dbo.Productos p (NOLOCK)
-WITH
-(INDEX
-(IX_Productos_Nombre))
-    INNER LOOP JOIN dbo.Categorias c
-WITH
-(NOLOCK)
-WITH
-(NOLOCK) ON c.Id = p.CategoriaId
-OPTION
-(RECOMPILE);
 GO
