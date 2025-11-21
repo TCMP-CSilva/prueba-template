@@ -31,7 +31,7 @@ CREATE TABLE #temp
 GO
 
 -- ===== PROBAR cursors
-DECLARE c CURSOR FOR SELECT *
+DECLARE c CURSOR FOR SELECT Id
 FROM dbo.Clientes;
 OPEN c;
 FETCH NEXT FROM c;
@@ -52,7 +52,7 @@ WHERE dbo.fn_valida_credito(o.clienteId) = 1;
 GO
 
 -- ===== PROBAR select_star
-SELECT *
+SELECT id
 FROM dbo.Productos; -- Falta NOLOCK aquí también
 GO
 
@@ -91,6 +91,9 @@ GO
 DELETE FROM dbo.Ordenes;
 UPDATE dbo.Clientes SET Activo = 0;
 GO
+
+-- ===== PROBAR delete_update_without_where2
+DELETE FROM dbo.Ordenes;
 
 -- ===== PROBAR exec_dynamic_sql_unparameterized
 DECLARE @col NVARCHAR(50) = 'Nombre';
