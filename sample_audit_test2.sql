@@ -23,8 +23,8 @@ CREATE TABLE ##global_temp_example
 GO
 
 -- ===== PROBAR temp_names
-DECLARE @temp TABLE (id INT);
-CREATE TABLE #temp
+DECLARE @temp1 TABLE (id INT);
+CREATE TABLE #temp1
 (
     x INT
 );
@@ -41,49 +41,49 @@ GO
 
 -- ===== PROBAR user_functions
 SELECT id
-FROM dbo.Clientes
+FROM dbo.Clientes WITH (NOLOCK)
 WHERE dbo.fn_es_activo(id) = 1;
 GO
 
 -- ===== PROBAR scalar_udf_in_select_where
 SELECT dbo.fn_calcula_descuento(monto) AS desc_calc
-FROM dbo.Ordenes o
+FROM dbo.Ordenes o (NOLOCK)
 WHERE dbo.fn_valida_credito(o.clienteId) = 1;
 GO
 
 -- ===== PROBAR select_star
 SELECT id
-FROM dbo.Productos; -- Falta NOLOCK aquí también
+FROM dbo.Productos WITH (NOLOCK); -- Falta NOLOCK aquí también
 GO
 
 -- ===== PROBAR select_top + top_without_order_by
 SELECT TOP 10
     p.Id, p.Nombre
-FROM dbo.Productos p; -- sin ORDER BY
+FROM dbo.Productos p WITH (NOLOCK); -- sin ORDER BY
 GO
 
 -- ===== PROBAR nolock
 SELECT p.Id, p.Nombre
-FROM dbo.Productos p INNER JOIN dbo.Categorias c ON c.Id = p.CategoriaId;
+FROM dbo.Productos p WITH (NOLOCK) INNER JOIN dbo.Categorias c WITH (NOLOCK) ON c.Id = p.CategoriaId;
 GO
 
 -- ===== PROBAR inner_join_where
 SELECT p.Id, c.Nombre, m.Nombre
 FROM dbo.Productos p
-    INNER JOIN dbo.Categorias c ON c.Id = p.CategoriaId
-    INNER JOIN dbo.Marcas m ON m.Id = p.MarcaId
+    INNER JOIN dbo.Categorias c WITH (NOLOCK) ON c.Id = p.CategoriaId
+    INNER JOIN dbo.Marcas m WITH (NOLOCK) ON m.Id = p.MarcaId
 WHERE p.Activo = 1;
 GO
 
 -- ===== PROBAR select_distinct_no_justification (SIN comentario)
 SELECT DISTINCT p.CategoriaId
-FROM dbo.Productos p;
+FROM dbo.Productos p WITH (NOLOCK);
 GO
 
 -- ===== PROBAR select_distinct_no_justification (CON justificación)
 -- justification: Consolidamos resultados por categoría para reporte semestral
 SELECT DISTINCT p.CategoriaId
-FROM dbo.Productos p
+FROM dbo.Productos p WITH (NOLOCK)
 WHERE p.Activo = 1;
 GO
 
@@ -97,7 +97,7 @@ DELETE FROM dbo.Ordenes;
 
 -- ===== PROBAR exec_dynamic_sql_unparameterized
 DECLARE @col NVARCHAR(50) = 'Nombre';
-DECLARE @sql NVARCHAR(MAX) = 'SELECT ' + @col + ' FROM dbo.Productos';
+DECLARE @sql NVARCHAR(MAX) = 'SELECT ' + @col + ' FROM dbo.Productos WITH (NOLOCK)';
 -- concatenación
 EXEC(@sql);
 EXEC sp_executesql @sql; -- concatenación previa
@@ -111,8 +111,13 @@ GO
 
 -- ===== PROBAR hint_usage_general
 SELECT p.Id
-FROM dbo.Productos p WITH (INDEX(IX_Productos_Nombre))
-    INNER LOOP JOIN dbo.Categorias c ON c.Id = p.CategoriaId
+FROM dbo.Productos p (NOLOCK)
+WITH
+(INDEX
+(IX_Productos_Nombre))
+    INNER LOOP JOIN dbo.Categorias c
+WITH
+(NOLOCK) ON c.Id = p.CategoriaId
 OPTION
 (RECOMPILE);
 GO
