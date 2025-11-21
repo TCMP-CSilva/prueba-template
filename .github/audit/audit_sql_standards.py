@@ -9,6 +9,7 @@ import configparser
 # -----------------------------
 CFG_FIXED_PATH = Path(".github/audit/audit_config.ini")
 
+
 def load_config_fixed(repo_root: Path) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
     cfg_path = (repo_root / CFG_FIXED_PATH).resolve()
@@ -18,16 +19,21 @@ def load_config_fixed(repo_root: Path) -> configparser.ConfigParser:
         cfg.read(cfg_path, encoding="utf-8")
     return cfg
 
+
 def parse_roots_from_config(cfg: configparser.ConfigParser, repo_root: Path) -> list[Path]:
     raw = cfg.get("paths", "sql_roots", fallback=".").strip()
     tokens = [t.strip() for t in raw.replace(";", ",").split(",") if t.strip()]
-    roots = [(repo_root / t if not Path(t).is_absolute() else Path(t)) for t in (tokens or ["."])]
+    roots = [
+        (repo_root / t if not Path(t).is_absolute() else Path(t))
+        for t in (tokens or ["."]
+    )]
     out = []
     for r in roots:
         r = r.resolve()
         if r not in out:
             out.append(r)
     return out or [repo_root]
+
 
 # -----------------------------
 # Severidades por regla
@@ -53,35 +59,54 @@ DEFAULT_SEVERITIES = {
     "hint_usage_general": "warning",
 }
 
+
 def sev(cfg, rule):
     s = cfg.get("severities", rule, fallback=DEFAULT_SEVERITIES.get(rule, "error")).lower()
     return "off" if s not in {"error", "warning", "off"} else s
 
+
 def badge(severity):
     return "❌" if severity == "error" else "⚠️"
+
 
 # -----------------------------
 # Patrones comunes
 # -----------------------------
-nolock_pattern = re.compile(r"(WITH\s*)?\(\s*NOLOCK\s*(,\s*READUNCOMMITTED\s*)?\)", re.IGNORECASE)
-nolock_paren_only_pattern = re.compile(r"\(\s*NOLOCK\s*(,\s*READUNCOMMITTED\s*)?\)", re.IGNORECASE)
-ignore_temp_tables_pattern = re.compile(r"\bFROM\s+[#@]{1,2}[\w\d_]+", re.IGNORECASE)
+nolock_pattern = re.compile(
+    r"(WITH\s*)?\(\s*NOLOCK\s*(,\s*READUNCOMMITTED\s*)?\)", re.IGNORECASE
+)
+nolock_paren_only_pattern = re.compile(
+    r"\(\s*NOLOCK\s*(,\s*READUNCOMMITTED\s*)?\)", re.IGNORECASE
+)
+ignore_temp_tables_pattern = re.compile(
+    r"\bFROM\s+[#@]{1,2}[\w\d_]+", re.IGNORECASE
+)
 global_temp_pattern = re.compile(r"##\w+", re.IGNORECASE)
 bad_temp_names_pattern = re.compile(r"(#temp|@temp)\b", re.IGNORECASE)
 cursor_pattern = re.compile(r"\bCURSOR\b", re.IGNORECASE)
-user_function_in_where_pattern = re.compile(r"WHERE\s+.*?\b(?:dbo|db|schema|owner)\.\w+\s*\(.*?\)", re.IGNORECASE)
+user_function_in_where_pattern = re.compile(
+    r"WHERE\s+.*?\b(?:dbo|db|schema|owner)\.\w+\s*\(.*?\)",
+    re.IGNORECASE,
+)
 
 # UDF (genérico) en SELECT/WHERE
 udf_call_pattern = re.compile(r"\b(?:\w+\.){0,2}\w+\s*\(", re.IGNORECASE)
 
 # Tipos deprecados
-deprecated_types_pattern = re.compile(r"\b(TEXT|NTEXT|IMAGE)\b", re.IGNORECASE)
+deprecated_types_pattern = re.compile(
+    r"\b(TEXT|NTEXT|IMAGE)\b", re.IGNORECASE
+)
 
 # Hints generales
 hints_pattern = re.compile(
-    r"\bWITH\s*\(\s*INDEX\s*\(|\bFORCESEEK\b|\bFAST\s+\d+\b|\b(LOOP|HASH|MERGE)\s+JOIN\b|\bOPTION\s*\((?:[^)]*)\)",
-    re.IGNORECASE
+    r"\bWITH\s*\(\s*INDEX\s*\(|"
+    r"\bFORCESEEK\b|"
+    r"\bFAST\s+\d+\b|"
+    r"\b(LOOP|HASH|MERGE)\s+JOIN\b|"
+    r"\bOPTION\s*\((?:[^)]*)\)",
+    re.IGNORECASE,
 )
+
 
 # sys.* y sysobjects (excepción en NOLOCK)
 def is_sys_table(token: str) -> bool:
@@ -94,11 +119,16 @@ def is_sys_table(token: str) -> bool:
         return True
     return False
 
+
 # -----------------------------
 # Carga de caracteres especiales
 # -----------------------------
 def compile_special_chars_pattern(cfg, repo_root: Path) -> re.Pattern:
-    rel = cfg.get("paths", "special_chars_file", fallback=".github/audit/special_chars.txt").strip()
+    rel = cfg.get(
+        "paths",
+        "special_chars_file",
+        fallback=".github/audit/special_chars.txt",
+    ).strip()
     path = (repo_root / rel) if not Path(rel).is_absolute() else Path(rel)
     chars = []
     if path.exists():
@@ -117,11 +147,13 @@ def compile_special_chars_pattern(cfg, repo_root: Path) -> re.Pattern:
     alt = "|".join(re.escape(c) for c in chars)
     return re.compile(alt, re.IGNORECASE)
 
+
 # -----------------------------
 # Reglas
 # -----------------------------
 def rule_enabled(cfg, key, default=True):
     return cfg.getboolean("rules", key, fallback=default)
+
 
 def check_nolock(lines):
     """
@@ -199,7 +231,11 @@ def check_nolock(lines):
         # Si estamos dentro de un bloque DML, tampoco auditamos NOLOCK
         if ignore_dml_block:
             # Fin de bloque DML: ; o GO o línea en blanco
-            if ";" in line or re.search(r"^\s*GO\s*$", line, re.IGNORECASE) or line.strip() == "":
+            if (
+                ";" in line
+                or re.search(r"^\s*GO\s*$", line, re.IGNORECASE)
+                or line.strip() == ""
+            ):
                 ignore_dml_block = False
             continue
 
@@ -239,20 +275,38 @@ def check_nolock(lines):
 
     return issues
 
+
 def check_special_chars(lines, special_chars_re):
-    return [f"   Línea {i}: {ln.strip()}" for i, ln in enumerate(lines, 1) if special_chars_re.search(ln)]
+    return [
+        f"   Línea {i}: {ln.strip()}"
+        for i, ln in enumerate(lines, 1)
+        if special_chars_re.search(ln)
+    ]
+
 
 def check_global_temp(lines):
-    return [f"   Línea {i}: {ln.strip()}" for i, ln in enumerate(lines, 1)
-            if not ln.strip().startswith('--') and global_temp_pattern.search(ln)]
+    return [
+        f"   Línea {i}: {ln.strip()}"
+        for i, ln in enumerate(lines, 1)
+        if not ln.strip().startswith("--") and global_temp_pattern.search(ln)
+    ]
+
 
 def check_temp_names(lines):
-    return [f"   Línea {i}: {ln.strip()}" for i, ln in enumerate(lines, 1)
-            if not ln.strip().startswith('--') and bad_temp_names_pattern.search(ln)]
+    return [
+        f"   Línea {i}: {ln.strip()}"
+        for i, ln in enumerate(lines, 1)
+        if not ln.strip().startswith("--") and bad_temp_names_pattern.search(ln)
+    ]
+
 
 def check_cursors(lines):
-    return [f"   Línea {i}: {ln.strip()}" for i, ln in enumerate(lines, 1)
-            if not ln.strip().startswith('--') and cursor_pattern.search(ln)]
+    return [
+        f"   Línea {i}: {ln.strip()}"
+        for i, ln in enumerate(lines, 1)
+        if not ln.strip().startswith("--") and cursor_pattern.search(ln)
+    ]
+
 
 def check_user_funcs(lines):
     issues = []
@@ -262,6 +316,7 @@ def check_user_funcs(lines):
         if user_function_in_where_pattern.search(ln):
             issues.append(f"   Línea {i}: {ln.strip()}")
     return issues
+
 
 def check_inner_join_warnings(lines):
     issues = []
@@ -288,7 +343,9 @@ def check_inner_join_warnings(lines):
             has_variant = True
         if re.search(r"\bWHERE\b", line, re.IGNORECASE):
             if join_count > 1 and not has_variant and first_join is not None:
-                issues.append(f"   Línea {first_join}: Múltiples INNER JOIN + WHERE sin variantes")
+                issues.append(
+                    f"   Línea {first_join}: Múltiples INNER JOIN + WHERE sin variantes"
+                )
             in_block = False
             join_count = 0
             has_variant = False
@@ -299,6 +356,7 @@ def check_inner_join_warnings(lines):
             has_variant = False
             first_join = None
     return issues
+
 
 def check_select_star(lines):
     issues = []
@@ -314,7 +372,11 @@ def check_select_star(lines):
             if re.search(r"\bFROM\b", line, re.IGNORECASE):
                 buffering = False
                 joined = " ".join(buf)
-                m = re.search(r"\bSELECT\b(?P<clause>.*?)\bFROM\b", joined, re.IGNORECASE | re.DOTALL)
+                m = re.search(
+                    r"\bSELECT\b(?P<clause>.*?)\bFROM\b",
+                    joined,
+                    re.IGNORECASE | re.DOTALL,
+                )
                 if m and re.fullmatch(r"\s*\*\s*", m.group("clause"), re.DOTALL):
                     issues.append(f"   Línea {start_line}: Uso de SELECT *")
                 buf = []
@@ -324,11 +386,16 @@ def check_select_star(lines):
             if re.search(r"\bFROM\b", line, re.IGNORECASE):
                 buffering = False
                 joined = " ".join(buf)
-                m = re.search(r"\bSELECT\b(?P<clause>.*?)\bFROM\b", joined, re.IGNORECASE | re.DOTALL)
+                m = re.search(
+                    r"\bSELECT\b(?P<clause>.*?)\bFROM\b",
+                    joined,
+                    re.IGNORECASE | re.DOTALL,
+                )
                 if m and re.fullmatch(r"\s*\*\s*", m.group("clause"), re.DOTALL):
                     issues.append(f"   Línea {start_line}: Uso de SELECT *")
                 buf = []
     return issues
+
 
 def check_select_top(lines):
     issues = []
@@ -344,7 +411,11 @@ def check_select_top(lines):
             if re.search(r"\bFROM\b", line, re.IGNORECASE):
                 buffering = False
                 joined = " ".join(buf)
-                m = re.search(r"\bSELECT\b(?P<clause>.*?)\bFROM\b", joined, re.IGNORECASE | re.DOTALL)
+                m = re.search(
+                    r"\bSELECT\b(?P<clause>.*?)\bFROM\b",
+                    joined,
+                    re.IGNORECASE | re.DOTALL,
+                )
                 if m and re.search(r"\bTOP\b", m.group("clause"), re.IGNORECASE):
                     issues.append(f"   Línea {start_line}: Uso de SELECT TOP")
                 buf = []
@@ -354,11 +425,16 @@ def check_select_top(lines):
             if re.search(r"\bFROM\b", line, re.IGNORECASE):
                 buffering = False
                 joined = " ".join(buf)
-                m = re.search(r"\bSELECT\b(?P<clause>.*?)\bFROM\b", joined, re.IGNORECASE | re.DOTALL)
+                m = re.search(
+                    r"\bSELECT\b(?P<clause>.*?)\bFROM\b",
+                    joined,
+                    re.IGNORECASE | re.DOTALL,
+                )
                 if m and re.search(r"\bTOP\b", m.group("clause"), re.IGNORECASE):
                     issues.append(f"   Línea {start_line}: Uso de SELECT TOP")
                 buf = []
     return issues
+
 
 def check_top_without_order_by(lines):
     issues = []
@@ -374,23 +450,34 @@ def check_top_without_order_by(lines):
             continue
         if buffering:
             buf.append(line)
-            if ";" in line or re.search(r"^\s*GO\s*$", line, re.IGNORECASE) or re.search(r"\bSELECT\b", line, re.IGNORECASE):
+            if (
+                ";" in line
+                or re.search(r"^\s*GO\s*$", line, re.IGNORECASE)
+                or re.search(r"\bSELECT\b", line, re.IGNORECASE)
+            ):
                 stmt = " ".join(buf)
-                if re.search(r"\bSELECT\s+TOP\b", stmt, re.IGNORECASE) and not re.search(r"\bORDER\s+BY\b", stmt, re.IGNORECASE):
-                    issues.append(f"   Línea {start_line}: SELECT TOP sin ORDER BY determinista")
+                if re.search(r"\bSELECT\s+TOP\b", stmt, re.IGNORECASE) and not re.search(
+                    r"\bORDER\s+BY\b", stmt, re.IGNORECASE
+                ):
+                    issues.append(
+                        f"   Línea {start_line}: SELECT TOP sin ORDER BY determinista"
+                    )
                 buffering = False
                 buf = []
                 start_line = None
     return issues
 
+
 def check_delete_update_without_where(lines):
     """
     Detecta DELETE/UPDATE sin WHERE sobre tablas físicas.
-    Excepciones:
-      - UPDATE @TablaVariable
-      - UPDATE #TablaTemporal
-      - DELETE FROM @TablaVariable
-      - DELETE FROM #TablaTemporal
+
+    Excepciones (NO se auditan):
+      - UPDATE directo sobre tabla variable:   UPDATE @TablaVariable ...
+      - UPDATE directo sobre tabla temporal:  UPDATE #TablaTemporal ...
+      - UPDATE alias de #/@:                  UPDATE t SET ... FROM #Temp t ...
+      - DELETE directo sobre #/@:             DELETE FROM #Temp / @TablaVariable
+      - DELETE alias de #/@:                  DELETE t FROM #Temp t ...
     """
     issues = []
     buffering = False
@@ -405,27 +492,70 @@ def check_delete_update_without_where(lines):
             m = re.search(r"\b(DELETE|UPDATE)\b", line, re.IGNORECASE)
             if m:
                 kind = m.group(1).upper()
-
-                # Excepciones: DML sobre tablas variables (@) o temporales (#)
-                if re.search(r"\bUPDATE\s+@[A-Za-z_][\w]*\b", line, re.IGNORECASE):
-                    continue
-                if re.search(r"\bUPDATE\s+#\w+\b", line, re.IGNORECASE):
-                    continue
-                if re.search(r"\bDELETE\s+FROM\s+@[A-Za-z_][\w]*\b", line, re.IGNORECASE):
-                    continue
-                if re.search(r"\bDELETE\s+FROM\s+#\w+\b", line, re.IGNORECASE):
-                    continue
-
                 buffering = True
                 buf = [line]
                 start_line = i
                 continue
         else:
             buf.append(line)
+            # Fin de sentencia DML: ; o GO
             if ";" in line or re.search(r"^\s*GO\s*$", line, re.IGNORECASE):
                 stmt = " ".join(buf)
-                if not re.search(r"\bWHERE\b", stmt, re.IGNORECASE):
-                    issues.append(f"   Línea {start_line}: {kind} sin cláusula WHERE")
+                stmt_up = stmt.upper()
+
+                # ---- EXCEPCIONES SOBRE TABLAS TEMPORALES / VARIABLES ----
+                skip = False
+
+                # 1) UPDATE directo sobre #/@ o alias de #/@
+                m_up = re.search(
+                    r"\bUPDATE\s+([A-Za-z_#@][\w#@]*)\b", stmt, re.IGNORECASE
+                )
+                if m_up:
+                    target = m_up.group(1)
+                    if target.startswith("#") or target.startswith("@"):
+                        skip = True
+                    else:
+                        # UPDATE alias que apunta a #/@ en FROM
+                        pattern_from_alias = (
+                            r"\bFROM\s+([#@][A-Za-z_][\w]*)\s+"
+                            + re.escape(target)
+                            + r"\b"
+                        )
+                        if re.search(pattern_from_alias, stmt, re.IGNORECASE):
+                            skip = True
+
+                # 2) DELETE sobre #/@ (directo o alias)
+                if not skip:
+                    # DELETE FROM #Temp / @TablaVar
+                    if re.search(
+                        r"\bDELETE\s+FROM\s+[#@][A-Za-z_][\w]*\b",
+                        stmt,
+                        re.IGNORECASE,
+                    ):
+                        skip = True
+                    else:
+                        # DELETE alias desde #/@ : DELETE t FROM #Temp t ...
+                        m_del_alias = re.search(
+                            r"\bDELETE\s+([A-Za-z_][\w]*)\b.*\bFROM\s+([#@][A-Za-z_][\w]*)\s+\1\b",
+                            stmt,
+                            re.IGNORECASE,
+                        )
+                        if m_del_alias:
+                            skip = True
+
+                if skip:
+                    buffering = False
+                    buf = []
+                    start_line = None
+                    kind = None
+                    continue
+
+                # ---- APLICAR REGLA NORMAL: EXIGE WHERE EN TABLAS FÍSICAS ----
+                if not re.search(r"\bWHERE\b", stmt_up, re.IGNORECASE):
+                    issues.append(
+                        f"   Línea {start_line}: {kind} sin cláusula WHERE"
+                    )
+
                 buffering = False
                 buf = []
                 start_line = None
@@ -433,19 +563,29 @@ def check_delete_update_without_where(lines):
 
     return issues
 
+
 def check_merge_usage(lines):
-    return [f"   Línea {i}: {ln.strip()}" for i, ln in enumerate(lines, 1)
-            if not ln.strip().startswith('--') and re.search(r"\bMERGE\b", ln, re.IGNORECASE)]
+    return [
+        f"   Línea {i}: {ln.strip()}"
+        for i, ln in enumerate(lines, 1)
+        if not ln.strip().startswith("--") and re.search(r"\bMERGE\b", ln, re.IGNORECASE)
+    ]
+
 
 def check_select_distinct_no_justification(lines):
     issues = []
     for i, ln in enumerate(lines, 1):
         if re.search(r"\bSELECT\s+DISTINCT\b", ln, re.IGNORECASE):
-            prev = lines[i-2:i-1] + lines[i-1:i]
+            prev = lines[i - 2 : i - 1] + lines[i - 1 : i]
             snippet = " ".join(prev + [ln])
-            if not re.search(r"--\s*justification\s*:", snippet, re.IGNORECASE):
-                issues.append(f"   Línea {i}: SELECT DISTINCT sin justificación (-- justification:)")
+            if not re.search(
+                r"--\s*justification\s*:", snippet, re.IGNORECASE
+            ):
+                issues.append(
+                    f"   Línea {i}: SELECT DISTINCT sin justificación (-- justification:)"
+                )
     return issues
+
 
 def check_exec_dynamic_sql_unparameterized(lines):
     issues = []
@@ -453,20 +593,28 @@ def check_exec_dynamic_sql_unparameterized(lines):
     pattern = re.compile(
         r"\bEXEC(?:UTE)?\b\s*(?:sp_executesql)?\s*\((?:[^)]*\+[^)]*)\)|"
         r"\bsp_executesql\b\s+@?\w+\s*=.*\+.*",
-        re.IGNORECASE | re.DOTALL
+        re.IGNORECASE | re.DOTALL,
     )
     for m in pattern.finditer(joined):
-        pos = joined[:m.start()].count("\n") + 1
-        issues.append(f"   Línea {pos}: SQL dinámico con concatenación no parametrizada")
+        pos = joined[: m.start()].count("\n") + 1
+        issues.append(
+            f"   Línea {pos}: SQL dinámico con concatenación no parametrizada"
+        )
     return issues
+
 
 def check_select_into_heavy(lines):
     issues = []
     for i, ln in enumerate(lines, 1):
         line = ln.split("--", 1)[0]
-        if re.search(r"\bSELECT\b.*\bINTO\b\s+#\w+", line, re.IGNORECASE):
-            issues.append(f"   Línea {i}: SELECT INTO #temp; recomienda CREATE TABLE + INSERT para control de tipos/índices")
+        if re.search(
+            r"\bSELECT\b.*\bINTO\b\s+#\w+", line, re.IGNORECASE
+        ):
+            issues.append(
+                f"   Línea {i}: SELECT INTO #temp; recomienda CREATE TABLE + INSERT para control de tipos/índices"
+            )
     return issues
+
 
 def check_scalar_udf_in_select_where(lines):
     """
@@ -478,10 +626,15 @@ def check_scalar_udf_in_select_where(lines):
         if ln.strip().startswith("--"):
             continue
         l = ln.split("--", 1)[0]
-        if re.search(r"\bSELECT\b", l, re.IGNORECASE) or re.search(r"\bWHERE\b", l, re.IGNORECASE):
+        if re.search(r"\bSELECT\b", l, re.IGNORECASE) or re.search(
+            r"\bWHERE\b", l, re.IGNORECASE
+        ):
             if udf_call_pattern.search(l):
-                issues.append(f"   Línea {i}: Posible UDF escalar en SELECT/WHERE -> {l.strip()}")
+                issues.append(
+                    f"   Línea {i}: Posible UDF escalar en SELECT/WHERE -> {l.strip()}"
+                )
     return issues
+
 
 def check_deprecated_types(lines):
     """
@@ -492,8 +645,11 @@ def check_deprecated_types(lines):
         if ln.strip().startswith("--"):
             continue
         if deprecated_types_pattern.search(ln):
-            issues.append(f"   Línea {i}: Uso de tipo deprecado (TEXT/NTEXT/IMAGE)")
+            issues.append(
+                f"   Línea {i}: Uso de tipo deprecado (TEXT/NTEXT/IMAGE)"
+            )
     return issues
+
 
 def check_hint_usage_general(lines):
     """
@@ -507,8 +663,11 @@ def check_hint_usage_general(lines):
         if ln.strip().startswith("--"):
             continue
         if hints_pattern.search(ln):
-            issues.append(f"   Línea {i}: Uso de hint de consulta -> {ln.strip()}")
+            issues.append(
+                f"   Línea {i}: Uso de hint de consulta -> {ln.strip()}"
+            )
     return issues
+
 
 # -----------------------------
 # Auditoría de archivo
@@ -519,12 +678,24 @@ def audit_file(fp: Path, cfg: configparser.ConfigParser, special_chars_re: re.Pa
 
     res = {
         "archivo": str(fp),
-        "nolock": [], "special": [], "global": [], "temp": [],
-        "curs": [], "funcs": [], "warn": [],
-        "select_star": [], "select_top": [],
-        "top_without_order_by": [], "delete_update_without_where": [], "merge_usage": [],
-        "select_distinct_no_justification": [], "exec_dynamic_sql_unparameterized": [], "select_into_heavy": [],
-        "scalar_udf_in_select_where": [], "deprecated_types": [], "hint_usage_general": []
+        "nolock": [],
+        "special": [],
+        "global": [],
+        "temp": [],
+        "curs": [],
+        "funcs": [],
+        "warn": [],
+        "select_star": [],
+        "select_top": [],
+        "top_without_order_by": [],
+        "delete_update_without_where": [],
+        "merge_usage": [],
+        "select_distinct_no_justification": [],
+        "exec_dynamic_sql_unparameterized": [],
+        "select_into_heavy": [],
+        "scalar_udf_in_select_where": [],
+        "deprecated_types": [],
+        "hint_usage_general": [],
     }
 
     if rule_enabled(cfg, "nolock", True):
@@ -549,24 +720,33 @@ def audit_file(fp: Path, cfg: configparser.ConfigParser, special_chars_re: re.Pa
     if rule_enabled(cfg, "top_without_order_by", True):
         res["top_without_order_by"] = check_top_without_order_by(lines)
     if rule_enabled(cfg, "delete_update_without_where", True):
-        res["delete_update_without_where"] = check_delete_update_without_where(lines)
+        res["delete_update_without_where"] = check_delete_update_without_where(
+            lines
+        )
     if rule_enabled(cfg, "merge_usage", True):
         res["merge_usage"] = check_merge_usage(lines)
     if rule_enabled(cfg, "select_distinct_no_justification", True):
-        res["select_distinct_no_justification"] = check_select_distinct_no_justification(lines)
+        res["select_distinct_no_justification"] = (
+            check_select_distinct_no_justification(lines)
+        )
     if rule_enabled(cfg, "exec_dynamic_sql_unparameterized", True):
-        res["exec_dynamic_sql_unparameterized"] = check_exec_dynamic_sql_unparameterized(lines)
+        res["exec_dynamic_sql_unparameterized"] = (
+            check_exec_dynamic_sql_unparameterized(lines)
+        )
     if rule_enabled(cfg, "select_into_heavy", True):
         res["select_into_heavy"] = check_select_into_heavy(lines)
 
     if rule_enabled(cfg, "scalar_udf_in_select_where", True):
-        res["scalar_udf_in_select_where"] = check_scalar_udf_in_select_where(lines)
+        res["scalar_udf_in_select_where"] = check_scalar_udf_in_select_where(
+            lines
+        )
     if rule_enabled(cfg, "deprecated_types", True):
         res["deprecated_types"] = check_deprecated_types(lines)
     if rule_enabled(cfg, "hint_usage_general", True):
         res["hint_usage_general"] = check_hint_usage_general(lines)
 
     return res
+
 
 # -----------------------------
 # Helpers de impresión
@@ -581,6 +761,7 @@ def show(rule_key: str, title: str, items: list, cfg: configparser.ConfigParser)
             print(it)
         return s == "error"
     return False
+
 
 # -----------------------------
 # Main
@@ -622,58 +803,170 @@ def main():
 
                 # Tamaño máximo de archivo (MB)
                 try:
-                    max_mb = float(cfg.get('paths', 'max_file_size_mb', fallback='5'))
+                    max_mb = float(
+                        cfg.get("paths", "max_file_size_mb", fallback="5")
+                    )
                 except Exception:
                     max_mb = 5.0
-                size_mb = (full.stat().st_size / (1024 * 1024)) if full.exists() else 0
+                size_mb = (
+                    full.stat().st_size / (1024 * 1024)
+                    if full.exists()
+                    else 0
+                )
                 if size_mb > max_mb:
                     # Se omite por tamaño, pero no es error
                     continue
 
                 res = audit_file(full, cfg, special_chars_re)
-                has_any = any([
-                    res["nolock"], res["special"], res["global"], res["temp"],
-                    res["curs"], res["funcs"], res["warn"], res["select_star"],
-                    res["select_top"], res["top_without_order_by"], res["delete_update_without_where"],
-                    res["merge_usage"], res["select_distinct_no_justification"],
-                    res["exec_dynamic_sql_unparameterized"], res["select_into_heavy"],
-                    res["scalar_udf_in_select_where"], res["deprecated_types"], res["hint_usage_general"]
-                ])
+                has_any = any(
+                    [
+                        res["nolock"],
+                        res["special"],
+                        res["global"],
+                        res["temp"],
+                        res["curs"],
+                        res["funcs"],
+                        res["warn"],
+                        res["select_star"],
+                        res["select_top"],
+                        res["top_without_order_by"],
+                        res["delete_update_without_where"],
+                        res["merge_usage"],
+                        res["select_distinct_no_justification"],
+                        res["exec_dynamic_sql_unparameterized"],
+                        res["select_into_heavy"],
+                        res["scalar_udf_in_select_where"],
+                        res["deprecated_types"],
+                        res["hint_usage_general"],
+                    ]
+                )
 
                 print(f"\n--- Archivo: {rel_print} ---")
                 if not has_any:
                     print("   (sin hallazgos)")
 
-                any_issue_as_error |= show("nolock", "Falta WITH (NOLOCK) en FROM/JOIN:", res["nolock"], cfg)
-                any_issue_as_error |= show("special_chars", "Caracteres especiales no permitidos:", res["special"], cfg)
-                any_issue_as_error |= show("global_temp", "Uso de tabla temporal global (##):", res["global"], cfg)
-                any_issue_as_error |= show("temp_names", "Nombre de temporal genérico (#temp/@temp):", res["temp"], cfg)
-                any_issue_as_error |= show("cursors", "Uso de cursor:", res["curs"], cfg)
-                any_issue_as_error |= show("user_functions", "Función en WHERE:", res["funcs"], cfg)
-                any_issue_as_error |= show("inner_join_where", "INNER JOIN + WHERE sin variantes:", res["warn"], cfg)
-                any_issue_as_error |= show("select_star", "SELECT * detectado:", res["select_star"], cfg)
-                any_issue_as_error |= show("select_top", "SELECT TOP detectado:", res["select_top"], cfg)
+                any_issue_as_error |= show(
+                    "nolock",
+                    "Falta WITH (NOLOCK) en FROM/JOIN:",
+                    res["nolock"],
+                    cfg,
+                )
+                any_issue_as_error |= show(
+                    "special_chars",
+                    "Caracteres especiales no permitidos:",
+                    res["special"],
+                    cfg,
+                )
+                any_issue_as_error |= show(
+                    "global_temp",
+                    "Uso de tabla temporal global (##):",
+                    res["global"],
+                    cfg,
+                )
+                any_issue_as_error |= show(
+                    "temp_names",
+                    "Nombre de temporal genérico (#temp/@temp):",
+                    res["temp"],
+                    cfg,
+                )
+                any_issue_as_error |= show(
+                    "cursors", "Uso de cursor:", res["curs"], cfg
+                )
+                any_issue_as_error |= show(
+                    "user_functions",
+                    "Función en WHERE:",
+                    res["funcs"],
+                    cfg,
+                )
+                any_issue_as_error |= show(
+                    "inner_join_where",
+                    "INNER JOIN + WHERE sin variantes:",
+                    res["warn"],
+                    cfg,
+                )
+                any_issue_as_error |= show(
+                    "select_star",
+                    "SELECT * detectado:",
+                    res["select_star"],
+                    cfg,
+                )
+                any_issue_as_error |= show(
+                    "select_top",
+                    "SELECT TOP detectado:",
+                    res["select_top"],
+                    cfg,
+                )
 
-                any_issue_as_error |= show("top_without_order_by", "SELECT TOP sin ORDER BY:", res["top_without_order_by"], cfg)
-                any_issue_as_error |= show("delete_update_without_where", "DELETE/UPDATE sin WHERE:", res["delete_update_without_where"], cfg)
-                any_issue_as_error |= show("merge_usage", "MERGE detectado:", res["merge_usage"], cfg)
-                any_issue_as_error |= show("select_distinct_no_justification", "SELECT DISTINCT sin justificación:", res["select_distinct_no_justification"], cfg)
-                any_issue_as_error |= show("exec_dynamic_sql_unparameterized", "EXEC dinámico sin parámetros:", res["exec_dynamic_sql_unparameterized"], cfg)
-                any_issue_as_error |= show("select_into_heavy", "SELECT INTO #temp (recomendación):", res["select_into_heavy"], cfg)
+                any_issue_as_error |= show(
+                    "top_without_order_by",
+                    "SELECT TOP sin ORDER BY:",
+                    res["top_without_order_by"],
+                    cfg,
+                )
+                any_issue_as_error |= show(
+                    "delete_update_without_where",
+                    "DELETE/UPDATE sin WHERE:",
+                    res["delete_update_without_where"],
+                    cfg,
+                )
+                any_issue_as_error |= show(
+                    "merge_usage",
+                    "MERGE detectado:",
+                    res["merge_usage"],
+                    cfg,
+                )
+                any_issue_as_error |= show(
+                    "select_distinct_no_justification",
+                    "SELECT DISTINCT sin justificación:",
+                    res["select_distinct_no_justification"],
+                    cfg,
+                )
+                any_issue_as_error |= show(
+                    "exec_dynamic_sql_unparameterized",
+                    "EXEC dinámico sin parámetros:",
+                    res["exec_dynamic_sql_unparameterized"],
+                    cfg,
+                )
+                any_issue_as_error |= show(
+                    "select_into_heavy",
+                    "SELECT INTO #temp (recomendación):",
+                    res["select_into_heavy"],
+                    cfg,
+                )
 
-                any_issue_as_error |= show("scalar_udf_in_select_where", "UDF escalar en SELECT/WHERE:", res["scalar_udf_in_select_where"], cfg)
-                any_issue_as_error |= show("deprecated_types", "Tipos deprecados (TEXT/NTEXT/IMAGE):", res["deprecated_types"], cfg)
-                any_issue_as_error |= show("hint_usage_general", "Hints de consulta detectados:", res["hint_usage_general"], cfg)
+                any_issue_as_error |= show(
+                    "scalar_udf_in_select_where",
+                    "UDF escalar en SELECT/WHERE:",
+                    res["scalar_udf_in_select_where"],
+                    cfg,
+                )
+                any_issue_as_error |= show(
+                    "deprecated_types",
+                    "Tipos deprecados (TEXT/NTEXT/IMAGE):",
+                    res["deprecated_types"],
+                    cfg,
+                )
+                any_issue_as_error |= show(
+                    "hint_usage_general",
+                    "Hints de consulta detectados:",
+                    res["hint_usage_general"],
+                    cfg,
+                )
 
     if not audited_any:
-        print("\n⚠️  No se auditó ningún directorio (revisa [paths] sql_roots).")
+        print(
+            "\n⚠️  No se auditó ningún directorio (revisa [paths] sql_roots)."
+        )
         return
 
     if any_issue_as_error:
         print("\n❌ Se encontraron errores en uno o más archivos SQL")
         sys.exit(1)
     else:
-        print("\n✅ Auditoría finalizada sin errores (sólo warnings o sin hallazgos).")
+        print(
+            "\n✅ Auditoría finalizada sin errores (sólo warnings o sin hallazgos)."
+        )
+
 
 if __name__ == "__main__":
     main()
