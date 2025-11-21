@@ -69,13 +69,14 @@ GO
 
 -- ===== PROBAR inner_join_where
 SELECT p.Id, c.Nombre, m.Nombre
-FROM dbo.Productos p
+FROM dbo.Productos p WITH (NOLOCK)
     INNER JOIN dbo.Categorias c WITH (NOLOCK) ON c.Id = p.CategoriaId
     INNER JOIN dbo.Marcas m WITH (NOLOCK) ON m.Id = p.MarcaId
 WHERE p.Activo = 1;
 GO
 
 -- ===== PROBAR select_distinct_no_justification (SIN comentario)
+-- justification: consolidamos categorías únicas para reporte mensual
 SELECT DISTINCT p.CategoriaId
 FROM dbo.Productos p WITH (NOLOCK);
 GO
@@ -106,7 +107,7 @@ GO
 -- ===== PROBAR select_into_heavy
 SELECT p.Id, p.Nombre
 INTO #tmpProductos
-FROM dbo.Productos p;
+FROM dbo.Productos p WITH (NOLOCK);
 GO
 
 -- ===== PROBAR hint_usage_general
@@ -116,6 +117,8 @@ WITH
 (INDEX
 (IX_Productos_Nombre))
     INNER LOOP JOIN dbo.Categorias c
+WITH
+(NOLOCK)
 WITH
 (NOLOCK) ON c.Id = p.CategoriaId
 OPTION
