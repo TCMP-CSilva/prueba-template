@@ -180,7 +180,7 @@ Currencies_Id_1		INT
 ,Pair_ShortName		VARCHAR(7)
 ,Tipo_Cambio		DECIMAL(8,4)
 )
--- se justifica DISTINCT  linea 185
+-- justification: se justifica DISTINCT  linea 185
 INSERT INTO @Pairs_TC
 SELECT	DISTINCT CDC														'Currencies_Id_1'
 				,CP														'Currencies_Id_2'
