@@ -25,7 +25,7 @@ BEGIN
 
 /*
 *******************************************************************************************************
-DESCRIPCION	:	Función que trae el valor remanente del valor de los flujos KG-15722.
+DESCRIPCION	:	FunciÃ³n que trae el valor remanente del valor de los flujos KG-15722.
 AUTOR		:	Cindy Calderon
 FECHA		:	2025-12-19
 EMPRESA		:	TCMP
