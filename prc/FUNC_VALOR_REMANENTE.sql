@@ -8,7 +8,7 @@ SET ANSI_WARNINGS ON
 GO
  
 PRINT '<<<<< START CREATING FUNCTION - FUNC_VALOR_REMANENTE >>>>>' 
-IF EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID('[FUNC_VALOR_REMANENTE]') AND type = 'FN')
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID('[FUNC_VALOR_REMANENTE]') AND type = 'FN')
 BEGIN
 PRINT '<<<<< DROP FUNCTION - FUNC_VALOR_REMANENTE >>>>>'
 	  DROP FUNCTION dbo.FUNC_VALOR_REMANENTE;
@@ -25,7 +25,7 @@ BEGIN
 
 /*
 *******************************************************************************************************
-DESCRIPCION	:	Función que trae el valor remanente del valor de los flujos KG-15722.
+DESCRIPCION	:	Funcion que trae el valor remanente del valor de los flujos KG-15722.
 AUTOR		:	Cindy Calderon
 FECHA		:	2025-12-19
 EMPRESA		:	TCMP
@@ -48,7 +48,7 @@ EMPRESA		:
 */
 
 DECLARE			@SwapDeals					INT			=	(SELECT KdbTables_Id FROM kplustp..KdbTables WITH (NOLOCK) WHERE KdbTables_Name = 'SwapDeals'),
-				@Resultado					VARCHAR(30)				
+				@Resultado					FLOAT	 			
 
 
 
@@ -66,7 +66,7 @@ SELECT DISTINCT	sh.Principal,
 				Principal,
 				PrincipalCur1
 
-FROM			kplustp..Event				e
+FROM			kplustp..Event				e   WITH (NOLOCK)
 INNER JOIN		kplustp..BODealFOKey		bo  WITH (NOLOCK)
 ON				e.BODeal_Id					=	bo.BODeal_Id
 AND				bo.DealIdFO					=	@DealId 
@@ -88,8 +88,8 @@ WHERE			PaymentDate					> @FechaPago
 ORDER BY		PaymentDate
 			
 
-RETURN ROUND ( @Resultado, 2 )
-
+RETURN  @Resultado
+ 
 END
 GO
 PRINT '<<<<< EXECUTE GRANT Function - FUNC_VALOR_REMANENTE >>>>>'
